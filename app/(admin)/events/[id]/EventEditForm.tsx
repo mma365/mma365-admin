@@ -19,9 +19,81 @@ type FightRow = {
   id: string;
   weight_class: string;
   is_main_event: boolean;
+  is_co_main_event: boolean;
   is_title_fight: boolean;
   outcome: string | null;
+  method: string | null;
+  round: number | null;
+  time: string | null;
+  winner_id: string | null;
+  red_corner_fighter_id: string | null;
+  blue_corner_fighter_id: string | null;
+  red: { first_name: string; last_name: string } | null;
+  blue: { first_name: string; last_name: string } | null;
 };
+
+type DiffEntry = { bout: string; from: string; to: string };
+type ParsedDiff = {
+  renames: { from: string; to: string }[];
+  newFights: string[];
+  removedFights: string[];
+  resultUpdates: DiffEntry[];
+  hasChanges: boolean;
+};
+
+function parseDiff(logs: string[]): ParsedDiff {
+  const out: ParsedDiff = { renames: [], newFights: [], removedFights: [], resultUpdates: [], hasChanges: false };
+
+  const startIdx = logs.findIndex(l => l.includes('[DRY RUN] Diff vs DB:'));
+  if (startIdx === -1) return out;
+
+  type Section = 'none' | 'new_fights' | 'removed_fights' | 'result_updates';
+  let section: Section = 'none';
+  let pendingBout: string | null = null;
+
+  for (let i = startIdx + 1; i < logs.length; i++) {
+    const s = logs[i].trimStart();
+    if (!s || s.startsWith('[Phase') || s.startsWith('Update complete')) {
+      section = 'none';
+      continue;
+    }
+
+    if (s.startsWith('~ Renamed:')) {
+      const m = s.match(/~ Renamed: '(.+)' → '(.+)'/);
+      if (m) { out.renames.push({ from: m[1], to: m[2] }); out.hasChanges = true; }
+      section = 'none';
+    } else if (s.startsWith('+ New fights:')) {
+      section = 'new_fights';
+      out.hasChanges = true;
+    } else if (s.startsWith('- Removed fights:')) {
+      section = 'removed_fights';
+      out.hasChanges = true;
+    } else if (s.startsWith('~ Result updates:')) {
+      section = 'result_updates';
+      out.hasChanges = true;
+    } else if (s.startsWith('+ New events:')) {
+      section = 'none';
+    } else if (section === 'new_fights' && s.startsWith('+ ')) {
+      out.newFights.push(s.slice(2));
+    } else if (section === 'removed_fights' && s.startsWith('- ')) {
+      out.removedFights.push(s.slice(2));
+    } else if (section === 'result_updates') {
+      const arrowIdx = s.indexOf(' → ');
+      if (arrowIdx !== -1 && pendingBout) {
+        out.resultUpdates.push({
+          bout: pendingBout,
+          from: s.slice(0, arrowIdx).trim(),
+          to: s.slice(arrowIdx + 3).trim(),
+        });
+        pendingBout = null;
+      } else if (s.includes(' vs ')) {
+        pendingBout = s.trim();
+      }
+    }
+  }
+
+  return out;
+}
 
 type SyncStatus = 'idle' | 'running' | 'done' | 'error';
 
@@ -30,8 +102,8 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
 
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [formError, setFormError] = useState('');
+  const [formSuccess, setFormSuccess] = useState('');
 
   const [form, setForm] = useState({
     name: event.name ?? '',
@@ -43,12 +115,13 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
     accent_color: event.accent_color ?? '',
   });
 
-  // ── Sherdog sync ──────────────────────────────────────────────────────────
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [syncLogs, setSyncLogs] = useState<string[]>([]);
   const [previewDone, setPreviewDone] = useState(false);
   const [applyDone, setApplyDone] = useState(false);
+  const [diff, setDiff] = useState<ParsedDiff | null>(null);
+  const [showRawLogs, setShowRawLogs] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   async function runSync(apply: boolean) {
@@ -58,7 +131,13 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
       setSyncLogs([]);
       setPreviewDone(false);
       setApplyDone(false);
+      setDiff(null);
+      setShowRawLogs(true);
+    } else {
+      setShowRawLogs(true);
     }
+
+    const allLogs: string[] = [];
 
     try {
       const res = await fetch('/api/scrape/event', {
@@ -86,29 +165,36 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
           if (text.startsWith('[DONE:')) {
             const code = parseInt(text.match(/\d+/)?.[0] ?? '0', 10);
             setSyncStatus(code === 0 ? 'done' : 'error');
-            if (apply) setApplyDone(true);
-            else setPreviewDone(true);
+            if (apply) {
+              setApplyDone(true);
+            } else {
+              setPreviewDone(true);
+              if (code === 0) {
+                setDiff(parseDiff(allLogs));
+                setShowRawLogs(false);
+              }
+            }
           } else {
-            setSyncLogs((prev) => {
-              const next = [...prev, text];
-              setTimeout(() => logRef.current?.scrollTo(0, logRef.current.scrollHeight), 0);
-              return next;
-            });
+            allLogs.push(text);
+            setSyncLogs([...allLogs]);
+            setTimeout(() => {
+              if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+            }, 0);
           }
         }
       }
     } catch (e) {
-      setSyncLogs((prev) => [...prev, `[ERREUR] ${String(e)}`]);
+      allLogs.push(`[ERREUR] ${String(e)}`);
+      setSyncLogs([...allLogs]);
       setSyncStatus('error');
     }
   }
 
-  // ── Form helpers ──────────────────────────────────────────────────────────
-  async function handleSave(e: React.FormEvent) {
+  async function handleSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setSaving(true);
-    setError('');
-    setSuccess('');
+    setFormError('');
+    setFormSuccess('');
     const res = await fetch(`/api/events/${event.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -125,9 +211,9 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
     setSaving(false);
     if (!res.ok) {
       const d = await res.json();
-      setError(d.error ?? 'Erreur');
+      setFormError(d.error ?? 'Erreur');
     } else {
-      setSuccess('Sauvegardé.');
+      setFormSuccess('Sauvegardé.');
     }
   }
 
@@ -152,13 +238,43 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
     );
   }
 
-  const statusColor: Record<SyncStatus, string> = {
-    idle: 'text-gray-400',
+  function fightResult(f: FightRow) {
+    if (!f.outcome) return <span className="text-gray-600 text-xs">—</span>;
+
+    const methodStr = f.method
+      ? `${f.method}${f.round ? ` R${f.round}` : ''}${f.time ? ` ${f.time}` : ''}`
+      : '';
+
+    if (f.outcome === 'win') {
+      let winnerName = '';
+      if (f.winner_id === f.red_corner_fighter_id && f.red) {
+        winnerName = `${f.red.first_name} ${f.red.last_name}`;
+      } else if (f.winner_id === f.blue_corner_fighter_id && f.blue) {
+        winnerName = `${f.blue.first_name} ${f.blue.last_name}`;
+      }
+      return (
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-xs text-green-400 font-semibold">W {winnerName}</span>
+          {methodStr && <span className="text-xs text-gray-500">· {methodStr}</span>}
+        </div>
+      );
+    }
+    if (f.outcome === 'draw') {
+      return <span className="text-xs text-yellow-400">Draw{methodStr ? ` · ${methodStr}` : ''}</span>;
+    }
+    if (f.outcome === 'nc') {
+      return <span className="text-xs text-gray-400">NC</span>;
+    }
+    return <span className="text-xs text-gray-400">{f.outcome}</span>;
+  }
+
+  const syncLabelColor: Record<SyncStatus, string> = {
+    idle: '',
     running: 'text-yellow-400',
     done: 'text-green-400',
     error: 'text-red-400',
   };
-  const statusLabel: Record<SyncStatus, string> = {
+  const syncLabel: Record<SyncStatus, string> = {
     idle: '',
     running: '⏳ En cours...',
     done: '✓ Terminé',
@@ -166,9 +282,9 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
   };
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-5xl">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-white text-2xl font-bold">Éditer l&apos;event</h1>
+        <h1 className="text-white text-2xl font-bold">{event.name}</h1>
         <button
           onClick={handleDelete}
           disabled={deleting}
@@ -178,39 +294,40 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
         </button>
       </div>
 
-      <form onSubmit={handleSave} className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex flex-col gap-4 mb-6">
-        {field('name', 'Nom')}
-        {field('organization', 'Organisation')}
-        {field('date', 'Date', 'date')}
-        {field('venue', 'Salle / Venue')}
-        {field('city', 'Ville')}
-        {field('country', 'Pays')}
-        {field('accent_color', 'Couleur accent (hex)')}
-
-        {error && <p className="text-red-400 text-sm">{error}</p>}
-        {success && <p className="text-green-400 text-sm">{success}</p>}
-
+      {/* ── Edit form ──────────────────────────────────────────────────────── */}
+      <form onSubmit={handleSave} className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          {field('name', 'Nom')}
+          {field('organization', 'Organisation')}
+          {field('date', 'Date', 'date')}
+          {field('venue', 'Salle / Venue')}
+          {field('city', 'Ville')}
+          {field('country', 'Pays')}
+          {field('accent_color', 'Couleur accent (hex)')}
+        </div>
+        {formError && <p className="text-red-400 text-sm mb-3">{formError}</p>}
+        {formSuccess && <p className="text-green-400 text-sm mb-3">{formSuccess}</p>}
         <button
           type="submit"
           disabled={saving}
-          className="bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg py-2.5 text-sm transition-colors disabled:opacity-50 mt-2"
+          className="bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg py-2.5 px-6 text-sm transition-colors disabled:opacity-50"
         >
           {saving ? 'Sauvegarde...' : 'Sauvegarder'}
         </button>
       </form>
 
-      {/* ── Sherdog Sync ──────────────────────────────────────────────────── */}
+      {/* ── Sherdog Sync ───────────────────────────────────────────────────── */}
       {event.sherdog_url ? (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl mb-8 overflow-hidden">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl mb-6 overflow-hidden">
           <button
-            onClick={() => setSyncOpen((o) => !o)}
+            onClick={() => setSyncOpen(o => !o)}
             className="w-full flex items-center justify-between px-6 py-4 hover:bg-gray-800/40 transition-colors"
           >
             <div className="flex items-center gap-3">
               <span className="text-white font-semibold text-sm">Synchroniser depuis Sherdog</span>
               {syncStatus !== 'idle' && (
-                <span className={`text-xs font-medium ${statusColor[syncStatus]}`}>
-                  {statusLabel[syncStatus]}
+                <span className={`text-xs font-medium ${syncLabelColor[syncStatus]}`}>
+                  {syncLabel[syncStatus]}
                 </span>
               )}
             </div>
@@ -226,7 +343,7 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
                 </a>
               </p>
 
-              <div className="flex gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <button
                   onClick={() => runSync(false)}
                   disabled={syncStatus === 'running'}
@@ -235,7 +352,7 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
                   {syncStatus === 'running' && !previewDone ? 'Analyse...' : 'Prévisualiser'}
                 </button>
 
-                {previewDone && !applyDone && (
+                {previewDone && !applyDone && diff?.hasChanges && (
                   <button
                     onClick={() => runSync(true)}
                     disabled={syncStatus === 'running'}
@@ -246,28 +363,109 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
                 )}
 
                 {applyDone && (
-                  <span className="text-green-400 text-sm self-center">Changements appliqués en base.</span>
+                  <span className="text-green-400 text-sm">✓ Changements appliqués en base.</span>
                 )}
               </div>
 
+              {/* Structured diff */}
+              {diff && previewDone && (
+                <div className="bg-gray-950 border border-gray-800 rounded-lg p-4">
+                  {!diff.hasChanges ? (
+                    <p className="text-green-400 text-sm">✓ Aucun changement — tout est à jour.</p>
+                  ) : (
+                    <div className="flex flex-col gap-4">
+                      {diff.renames.length > 0 && (
+                        <div>
+                          <h4 className="text-yellow-400 text-xs font-semibold uppercase tracking-wide mb-2">Renommage</h4>
+                          {diff.renames.map((r, i) => (
+                            <p key={i} className="text-sm">
+                              <span className="text-gray-500 line-through">{r.from}</span>
+                              {' → '}
+                              <span className="text-yellow-300">{r.to}</span>
+                            </p>
+                          ))}
+                        </div>
+                      )}
+
+                      {diff.resultUpdates.length > 0 && (
+                        <div>
+                          <h4 className="text-blue-400 text-xs font-semibold uppercase tracking-wide mb-2">
+                            Résultats ({diff.resultUpdates.length})
+                          </h4>
+                          <div className="flex flex-col gap-2">
+                            {diff.resultUpdates.map((u, i) => (
+                              <div key={i}>
+                                <p className="text-gray-300 text-xs font-medium">{u.bout}</p>
+                                <p className="text-xs ml-3">
+                                  <span className="text-gray-600 line-through">{u.from}</span>
+                                  {' → '}
+                                  <span className="text-blue-300">{u.to}</span>
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {diff.newFights.length > 0 && (
+                        <div>
+                          <h4 className="text-green-400 text-xs font-semibold uppercase tracking-wide mb-2">
+                            Nouveaux combats ({diff.newFights.length})
+                          </h4>
+                          <div className="flex flex-col gap-1">
+                            {diff.newFights.map((f, i) => (
+                              <p key={i} className="text-xs text-green-300">+ {f}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {diff.removedFights.length > 0 && (
+                        <div>
+                          <h4 className="text-red-400 text-xs font-semibold uppercase tracking-wide mb-2">
+                            Combats annulés ({diff.removedFights.length})
+                          </h4>
+                          <div className="flex flex-col gap-1">
+                            {diff.removedFights.map((f, i) => (
+                              <p key={i} className="text-xs text-red-300">- {f}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Raw logs (collapsible) */}
               {syncLogs.length > 0 && (
-                <pre
-                  ref={logRef}
-                  className="bg-gray-950 border border-gray-800 rounded-lg p-4 text-xs font-mono text-gray-300 max-h-80 overflow-y-auto whitespace-pre-wrap leading-5"
-                >
-                  {syncLogs.join('\n')}
-                </pre>
+                <div>
+                  <button
+                    onClick={() => setShowRawLogs(v => !v)}
+                    className="text-gray-500 hover:text-gray-400 text-xs transition-colors"
+                  >
+                    {showRawLogs ? '▲ Masquer les logs' : '▼ Afficher les logs bruts'}
+                  </button>
+                  {showRawLogs && (
+                    <pre
+                      ref={logRef}
+                      className="mt-2 bg-gray-950 border border-gray-800 rounded-lg p-4 text-xs font-mono text-gray-400 max-h-72 overflow-y-auto whitespace-pre-wrap leading-5"
+                    >
+                      {syncLogs.join('\n')}
+                    </pre>
+                  )}
+                </div>
               )}
             </div>
           )}
         </div>
       ) : (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl px-6 py-4 mb-8 flex items-center gap-2">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl px-6 py-4 mb-6">
           <span className="text-gray-500 text-sm">Aucun lien Sherdog — synchronisation indisponible.</span>
         </div>
       )}
 
-      {/* ── Fights list ───────────────────────────────────────────────────── */}
+      {/* ── Fights table ───────────────────────────────────────────────────── */}
       {fights.length > 0 && (
         <div>
           <h2 className="text-white text-lg font-semibold mb-3">Combats ({fights.length})</h2>
@@ -275,27 +473,37 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-800">
+                  <th className="text-left text-gray-400 font-medium px-4 py-3">Matchup</th>
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Division</th>
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Type</th>
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Résultat</th>
                 </tr>
               </thead>
               <tbody>
-                {fights.map((f) => (
-                  <tr key={f.id} className="border-b border-gray-800/50">
-                    <td className="px-4 py-2.5 text-gray-300">{f.weight_class}</td>
-                    <td className="px-4 py-2.5 text-gray-400 text-xs">
-                      {f.is_main_event ? '⭐ Main Event' : f.is_title_fight ? '🏆 Title' : '—'}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      {f.outcome ? (
-                        <span className="text-xs bg-green-900/40 text-green-400 px-2 py-0.5 rounded">{f.outcome}</span>
-                      ) : (
-                        <span className="text-xs text-gray-600">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {fights.map((f) => {
+                  const redName = f.red ? `${f.red.first_name} ${f.red.last_name}` : '?';
+                  const blueName = f.blue ? `${f.blue.first_name} ${f.blue.last_name}` : '?';
+                  return (
+                    <tr key={f.id} className="border-b border-gray-800/50 last:border-0">
+                      <td className="px-4 py-3">
+                        <span className="text-gray-200">{redName}</span>
+                        <span className="text-gray-600 mx-2">vs</span>
+                        <span className="text-gray-200">{blueName}</span>
+                      </td>
+                      <td className="px-4 py-3 text-gray-400 text-xs">{f.weight_class}</td>
+                      <td className="px-4 py-3 text-gray-500 text-xs">
+                        {f.is_main_event
+                          ? '⭐ Main Event'
+                          : f.is_co_main_event
+                          ? '✨ Co-Main'
+                          : f.is_title_fight
+                          ? '🏆 Title'
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3">{fightResult(f)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

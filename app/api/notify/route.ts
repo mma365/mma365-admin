@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     const { data: tokens } = await supabase
       .from('push_tokens')
       .select('token')
-      .eq('active', true);
+      .eq('notify_global', true);
 
     if (!tokens || tokens.length === 0) {
       return NextResponse.json({ error: 'Aucun token trouvé' }, { status: 404 });

@@ -12,9 +12,16 @@ export default async function EventEditPage({ params }: { params: Promise<{ id: 
     supabase.from('events').select('*').eq('id', id).single(),
     supabase
       .from('fights')
-      .select('id,weight_class,is_main_event,is_title_fight,outcome,red_corner_fighter_id,blue_corner_fighter_id')
+      .select(`
+        id, weight_class, is_main_event, is_co_main_event, is_title_fight,
+        outcome, method, round, time, winner_id,
+        red_corner_fighter_id, blue_corner_fighter_id,
+        red:fighters!red_corner_fighter_id(first_name, last_name),
+        blue:fighters!blue_corner_fighter_id(first_name, last_name)
+      `)
       .eq('event_id', id)
-      .order('is_main_event', { ascending: false }),
+      .order('is_main_event', { ascending: false })
+      .order('is_co_main_event', { ascending: false }),
   ]);
 
   if (!event) notFound();
