@@ -3,7 +3,7 @@ import path from 'path';
 import { NextRequest } from 'next/server';
 
 export async function POST(request: NextRequest) {
-  const { sherdog_url, apply } = await request.json();
+  const { sherdog_url, apply, set_manual } = await request.json();
 
   const scrapersPath = process.env.SCRAPERS_PATH;
   if (!scrapersPath) {
@@ -18,6 +18,7 @@ export async function POST(request: NextRequest) {
   // -u : unbuffered stdout (logs appear in real-time instead of all at the end)
   const args = ['-u', scriptPath, '--event-url', sherdog_url];
   if (!apply) args.push('--dry-run');
+  if (set_manual) args.push('--set-manual');
 
   const encoder = new TextEncoder();
 

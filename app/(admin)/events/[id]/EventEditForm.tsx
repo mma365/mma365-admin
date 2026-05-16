@@ -13,6 +13,7 @@ type EventRow = Record<string, unknown> & {
   country: string | null;
   accent_color: string | null;
   sherdog_url: string | null;
+  is_manual: boolean | null;
 };
 
 type FightRow = {
@@ -143,7 +144,7 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
       const res = await fetch('/api/scrape/event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sherdog_url: event.sherdog_url, apply }),
+        body: JSON.stringify({ sherdog_url: event.sherdog_url, apply, set_manual: event.is_manual ?? false }),
       });
 
       const reader = res.body!.getReader();
