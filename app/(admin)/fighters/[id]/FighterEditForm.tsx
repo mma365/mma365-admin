@@ -21,6 +21,7 @@ type FighterRow = Record<string, unknown> & {
   stance: string | null;
   image_uri: string | null;
   sherdog_url: string | null;
+  locked_fields: string[] | null;
 };
 
 type FighterDiffField = { field: string; from: string; to: string };
@@ -41,12 +42,13 @@ const FIELD_LABELS: Record<string, string> = {
   stance:        'Stance',
 };
 
+// Fields that can be locked (won't be overwritten by sync_fighters.py)
+const LOCKABLE_FIELDS = new Set(['first_name', 'last_name', 'nickname', 'country', 'height']);
+
 function parseFighterDiff(logs: string[]): FighterDiff {
   const out: FighterDiff = { fields: [], hasChanges: false };
-
   const startIdx = logs.findIndex(l => l.includes('[DRY RUN] Diff vs DB:'));
   if (startIdx === -1) return out;
-
   for (let i = startIdx + 1; i < logs.length; i++) {
     const s = logs[i].trimStart();
     if (!s) continue;
@@ -56,7 +58,6 @@ function parseFighterDiff(logs: string[]): FighterDiff {
       out.hasChanges = true;
     }
   }
-
   return out;
 }
 
@@ -87,6 +88,13 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
     image_uri:     fighter.image_uri ?? '',
   });
 
+  // Tracks which lockable fields are currently protected from sync
+  const [lockedFields, setLockedFields] = useState<Set<string>>(
+    new Set(fighter.locked_fields ?? [])
+  );
+  // Tracks which lockable fields have been modified this session
+  const [dirtyFields, setDirtyFields] = useState<Set<string>>(new Set());
+
   const [syncOpen, setSyncOpen] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle');
   const [syncLogs, setSyncLogs] = useState<string[]>([]);
@@ -95,6 +103,25 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
   const [diff, setDiff] = useState<FighterDiff | null>(null);
   const [showRawLogs, setShowRawLogs] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
+
+  function handleFieldChange(key: keyof typeof form, value: string) {
+    setForm(f => ({ ...f, [key]: value }));
+    if (LOCKABLE_FIELDS.has(key)) {
+      setDirtyFields(s => new Set(s).add(key));
+    }
+  }
+
+  function toggleLock(key: string) {
+    setLockedFields(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
 
   async function runSync(apply: boolean) {
     if (!fighter.sherdog_url) return;
@@ -110,30 +137,24 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
     }
 
     const allLogs: string[] = [];
-
     try {
       const res = await fetch('/api/scrape/fighter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sherdog_url: fighter.sherdog_url, apply }),
       });
-
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         const raw = decoder.decode(value, { stream: true });
         for (const line of raw.split('\n')) {
           if (!line.startsWith('data: ')) continue;
           const payload = line.slice(6).trim();
           if (!payload) continue;
-
           let text: string;
           try { text = JSON.parse(payload); } catch { text = payload; }
-
           if (text.startsWith('[DONE:')) {
             const code = parseInt(text.match(/\d+/)?.[0] ?? '0', 10);
             setSyncStatus(code === 0 ? 'done' : 'error');
@@ -167,6 +188,13 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
     setSaving(true);
     setFormError('');
     setFormSuccess('');
+
+    // Any lockable field modified this session gets added to locked_fields on save
+    const newLocked = new Set(lockedFields);
+    for (const field of dirtyFields) {
+      if (LOCKABLE_FIELDS.has(field)) newLocked.add(field);
+    }
+
     const res = await fetch(`/api/fighters/${fighter.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -186,13 +214,17 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
         reach:         form.reach || null,
         stance:        form.stance || null,
         image_uri:     form.image_uri || null,
+        locked_fields: Array.from(newLocked),
       }),
     });
+
     setSaving(false);
     if (!res.ok) {
       const d = await res.json();
       setFormError(d.error ?? 'Erreur');
     } else {
+      setLockedFields(newLocked);
+      setDirtyFields(new Set());
       setFormSuccess('Sauvegardé.');
     }
   }
@@ -205,14 +237,41 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
   }
 
   function field(key: keyof typeof form, label: string, type = 'text') {
+    const isLockable = LOCKABLE_FIELDS.has(key);
+    const isLocked = lockedFields.has(key);
+    const isDirty = dirtyFields.has(key);
+
     return (
       <div className="flex flex-col gap-1">
-        <label className="text-gray-400 text-xs">{label}</label>
+        <div className="flex items-center justify-between h-5">
+          <label className="text-gray-400 text-xs">{label}</label>
+          {isLockable && (
+            <button
+              type="button"
+              onClick={() => toggleLock(key)}
+              title={isLocked ? 'Déverrouiller (Sherdog pourra modifier ce champ)' : 'Verrouiller (protéger de la synchro Sherdog)'}
+              className={`flex items-center gap-1 text-xs transition-colors ${
+                isLocked
+                  ? 'text-yellow-500 hover:text-gray-400'
+                  : isDirty
+                  ? 'text-gray-500 hover:text-yellow-500'
+                  : 'text-gray-700 hover:text-gray-500'
+              }`}
+            >
+              {isLocked ? '🔒' : '🔓'}
+              <span className="hidden sm:inline">
+                {isLocked ? 'verrouillé' : isDirty ? 'verrouiller' : ''}
+              </span>
+            </button>
+          )}
+        </div>
         <input
           type={type}
           value={form[key]}
-          onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-          className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
+          onChange={(e) => handleFieldChange(key, e.target.value)}
+          className={`bg-gray-800 border text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500 ${
+            isLocked ? 'border-yellow-800/60' : 'border-gray-700'
+          }`}
         />
       </div>
     );
@@ -225,12 +284,21 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
     idle: '', running: '⏳ En cours...', done: '✓ Terminé', error: '✗ Erreur',
   };
 
+  const lockedCount = lockedFields.size;
+
   return (
     <div className="max-w-2xl">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-white text-2xl font-bold">
-          {fighter.first_name} {fighter.last_name}
-        </h1>
+        <div>
+          <h1 className="text-white text-2xl font-bold">
+            {fighter.first_name} {fighter.last_name}
+          </h1>
+          {lockedCount > 0 && (
+            <p className="text-yellow-600 text-xs mt-1">
+              🔒 {lockedCount} champ{lockedCount > 1 ? 's' : ''} verrouillé{lockedCount > 1 ? 's' : ''} — protégé{lockedCount > 1 ? 's' : ''} de la synchro Sherdog
+            </p>
+          )}
+        </div>
         <button
           onClick={handleDelete}
           disabled={deleting}
@@ -300,6 +368,11 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
 
           {syncOpen && (
             <div className="border-t border-gray-800 p-6 flex flex-col gap-4">
+              {lockedCount > 0 && (
+                <p className="text-yellow-600/80 text-xs bg-yellow-950/30 border border-yellow-900/40 rounded-lg px-3 py-2">
+                  🔒 Les champs verrouillés ({Array.from(lockedFields).map(f => FIELD_LABELS[f] ?? f).join(', ')}) ne seront pas modifiés par la synchro automatique.
+                </p>
+              )}
               <p className="text-gray-400 text-xs">
                 URL :{' '}
                 <a href={fighter.sherdog_url} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">
@@ -358,7 +431,7 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
                 </div>
               )}
 
-              {/* Raw logs (collapsible) */}
+              {/* Raw logs */}
               {syncLogs.length > 0 && (
                 <div>
                   <button
