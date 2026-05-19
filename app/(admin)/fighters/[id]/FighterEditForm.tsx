@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import CountryPicker, { COUNTRY_FLAGS } from './CountryPicker';
 
 type FighterRow = Record<string, unknown> & {
   id: string;
@@ -22,6 +23,7 @@ type FighterRow = Record<string, unknown> & {
   image_uri: string | null;
   sherdog_url: string | null;
   locked_fields: string[] | null;
+  country_flag: string | null;
 };
 
 type FighterDiffField = { field: string; from: string; to: string };
@@ -77,6 +79,7 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
     organization:  fighter.organization ?? '',
     weight_class:  fighter.weight_class ?? '',
     country:       fighter.country ?? '',
+    country_flag:  fighter.country_flag ?? (COUNTRY_FLAGS[fighter.country ?? ''] ?? '🏳️'),
     wins:          String(fighter.wins ?? 0),
     losses:        String(fighter.losses ?? 0),
     draws:         String(fighter.draws ?? 0),
@@ -205,6 +208,7 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
         organization:  form.organization,
         weight_class:  form.weight_class,
         country:       form.country,
+        country_flag:  form.country_flag,
         wins:          Number(form.wins),
         losses:        Number(form.losses),
         draws:         Number(form.draws),
@@ -319,7 +323,38 @@ export default function FighterEditForm({ fighter }: { fighter: FighterRow }) {
           {field('organization', 'Organisation')}
           {field('weight_class', 'Division')}
         </div>
-        {field('country', 'Pays')}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between h-5">
+            <label className="text-gray-400 text-xs">Pays</label>
+            {LOCKABLE_FIELDS.has('country') && (
+              <button
+                type="button"
+                onClick={() => toggleLock('country')}
+                title={lockedFields.has('country') ? 'Déverrouiller' : 'Verrouiller'}
+                className={`flex items-center gap-1 text-xs transition-colors ${
+                  lockedFields.has('country')
+                    ? 'text-yellow-500 hover:text-gray-400'
+                    : dirtyFields.has('country')
+                    ? 'text-gray-500 hover:text-yellow-500'
+                    : 'text-gray-700 hover:text-gray-500'
+                }`}
+              >
+                {lockedFields.has('country') ? '🔒' : '🔓'}
+                <span className="hidden sm:inline">
+                  {lockedFields.has('country') ? 'verrouillé' : dirtyFields.has('country') ? 'verrouiller' : ''}
+                </span>
+              </button>
+            )}
+          </div>
+          <CountryPicker
+            value={form.country}
+            isLocked={lockedFields.has('country')}
+            onChange={(country, flag) => {
+              setForm(f => ({ ...f, country, country_flag: flag }));
+              setDirtyFields(s => new Set(s).add('country'));
+            }}
+          />
+        </div>
         <div className="grid grid-cols-4 gap-3">
           {field('wins', 'Victoires', 'number')}
           {field('losses', 'Défaites', 'number')}
