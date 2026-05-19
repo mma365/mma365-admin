@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const scriptPath = path.join(scrapersPath, 'update.py');
+  const scriptPath = path.join(scrapersPath, 'sync_events.py');
   const python = process.env.PYTHON_CMD || 'python';
   // -u : unbuffered stdout (logs appear in real-time instead of all at the end)
   const args = ['-u', scriptPath, '--event-url', sherdog_url];
