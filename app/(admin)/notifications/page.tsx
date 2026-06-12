@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
-type LinkType = 'none' | 'event' | 'fighter' | 'fight';
+type LinkType = 'none' | 'event' | 'fighter' | 'fight' | 'url';
 
 type SearchResult = { id: string; label: string; sublabel?: string };
 
@@ -27,6 +27,7 @@ export default function NotificationsPage() {
   const [result, setResult] = useState<{ success?: string; error?: string } | null>(null);
 
   const [linkType, setLinkType] = useState<LinkType>('none');
+  const [externalUrl, setExternalUrl] = useState('');
   const [search, setSearch] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -50,11 +51,12 @@ export default function NotificationsPage() {
     setSelectedLink(null);
     setSelectedFighter(null);
     setFights([]);
+    setExternalUrl('');
   }, [linkType]);
 
   // Search events or fighters via API route (uses admin client server-side)
   useEffect(() => {
-    if (linkType === 'none') return;
+    if (linkType === 'none' || linkType === 'url') return;
     if (linkType === 'fight' && selectedFighter) return;
     if (debouncedSearch.trim().length < 2) {
       setSearchResults([]);
@@ -167,8 +169,10 @@ export default function NotificationsPage() {
     setLoading(true);
     setResult(null);
     try {
-      const payload: { title: string; body: string; link?: { type: string; id: string } } = { title, body };
-      if (selectedLink) {
+      const payload: { title: string; body: string; link?: { type: string; id?: string; url?: string } } = { title, body };
+      if (linkType === 'url' && externalUrl.trim()) {
+        payload.link = { type: 'url', url: externalUrl.trim() };
+      } else if (selectedLink) {
         payload.link = { type: selectedLink.type, id: selectedLink.id };
       }
 
@@ -186,6 +190,7 @@ export default function NotificationsPage() {
         setSelectedFighter(null);
         setFights([]);
         setLinkType('none');
+        setExternalUrl('');
       } else {
         setResult({ error: data.error ?? 'Erreur inconnue' });
       }
@@ -200,6 +205,7 @@ export default function NotificationsPage() {
     { value: 'event', label: '📅 Événement' },
     { value: 'fighter', label: '🥊 Combattant' },
     { value: 'fight', label: '⚔️ Combat' },
+    { value: 'url', label: '🔗 URL externe' },
   ];
 
   return (
@@ -255,8 +261,27 @@ export default function NotificationsPage() {
             </div>
           </div>
 
+          {/* External URL input */}
+          {linkType === 'url' && (
+            <div>
+              <label className="text-gray-400 text-sm block mb-1.5">URL externe (https)</label>
+              <input
+                type="url"
+                value={externalUrl}
+                onChange={(e) => setExternalUrl(e.target.value)}
+                placeholder="https://mma365.app/..."
+                pattern="https://.*"
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-red-500"
+                required
+              />
+              <p className="text-gray-500 text-xs mt-1.5">
+                Au tap sur la notification, le téléphone ouvrira cette page dans le navigateur.
+              </p>
+            </div>
+          )}
+
           {/* Search section */}
-          {linkType !== 'none' && (
+          {linkType !== 'none' && linkType !== 'url' && (
             <div>
               {selectedLink ? (
                 <div className="flex items-center justify-between bg-gray-800 border border-green-700 text-white rounded-lg px-4 py-3 text-sm">

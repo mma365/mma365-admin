@@ -3,13 +3,17 @@ import { NextResponse } from 'next/server';
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
-type LinkInfo = { type: 'event' | 'fighter' | 'fight'; id: string } | undefined;
+type LinkInfo =
+  | { type: 'event' | 'fighter' | 'fight'; id: string }
+  | { type: 'url'; url: string }
+  | undefined;
 
 function buildData(link: LinkInfo): Record<string, string> {
   if (!link) return {};
   if (link.type === 'event')   return { type: 'event_today',    eventId:   link.id };
   if (link.type === 'fighter') return { type: 'ranking_change', fighterId: link.id };
   if (link.type === 'fight')   return { type: 'fight_result',   fightId:   link.id };
+  if (link.type === 'url')     return { type: 'broadcast',      url:       link.url };
   return {};
 }
 
@@ -17,6 +21,9 @@ export async function POST(request: Request) {
   try {
     const { title, body, link } = await request.json();
     if (!title || !body) return NextResponse.json({ error: 'title et body requis' }, { status: 400 });
+    if (link?.type === 'url' && !String(link.url ?? '').startsWith('https://')) {
+      return NextResponse.json({ error: 'le lien externe doit commencer par https://' }, { status: 400 });
+    }
 
     const supabase = createAdminClient();
     const { data: tokens } = await supabase
