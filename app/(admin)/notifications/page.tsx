@@ -23,6 +23,9 @@ function useDebounce(value: string, delay: number) {
 export default function NotificationsPage() {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
+  const [titleEn, setTitleEn] = useState('');
+  const [bodyEn, setBodyEn] = useState('');
+  const [showEnVariant, setShowEnVariant] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ success?: string; error?: string } | null>(null);
 
@@ -169,7 +172,14 @@ export default function NotificationsPage() {
     setLoading(true);
     setResult(null);
     try {
-      const payload: { title: string; body: string; link?: { type: string; id?: string; url?: string } } = { title, body };
+      const payload: {
+        title: string; body: string; titleEn?: string; bodyEn?: string;
+        link?: { type: string; id?: string; url?: string };
+      } = { title, body };
+      if (showEnVariant && titleEn.trim() && bodyEn.trim()) {
+        payload.titleEn = titleEn.trim();
+        payload.bodyEn = bodyEn.trim();
+      }
       if (linkType === 'url' && externalUrl.trim()) {
         payload.link = { type: 'url', url: externalUrl.trim() };
       } else if (selectedLink) {
@@ -191,6 +201,9 @@ export default function NotificationsPage() {
         setFights([]);
         setLinkType('none');
         setExternalUrl('');
+        setTitleEn('');
+        setBodyEn('');
+        setShowEnVariant(false);
       } else {
         setResult({ error: data.error ?? 'Erreur inconnue' });
       }
@@ -238,6 +251,39 @@ export default function NotificationsPage() {
               className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-red-500 resize-none"
               required
             />
+          </div>
+
+          {/* English variant (optional) */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowEnVariant((v) => !v)}
+              className="text-gray-400 text-sm hover:text-white transition-colors"
+            >
+              {showEnVariant ? '▾' : '▸'} Version anglaise (optionnel)
+            </button>
+            {showEnVariant && (
+              <div className="mt-3 flex flex-col gap-3 border-l-2 border-gray-700 pl-4">
+                <p className="text-gray-500 text-xs">
+                  Si remplie, les téléphones en français reçoivent le texte ci-dessus et tous les
+                  autres cette version anglaise. Sinon, tout le monde reçoit le texte ci-dessus.
+                </p>
+                <input
+                  type="text"
+                  value={titleEn}
+                  onChange={(e) => setTitleEn(e.target.value)}
+                  placeholder="Title (EN)"
+                  className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-red-500"
+                />
+                <textarea
+                  value={bodyEn}
+                  onChange={(e) => setBodyEn(e.target.value)}
+                  placeholder="Notification content (EN)..."
+                  rows={3}
+                  className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-red-500 resize-none"
+                />
+              </div>
+            )}
           </div>
 
           {/* Link type tabs */}

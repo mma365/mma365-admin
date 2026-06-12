@@ -19,7 +19,7 @@ function buildData(link: LinkInfo): Record<string, string> {
 
 export async function POST(request: Request) {
   try {
-    const { title, body, link } = await request.json();
+    const { title, body, titleEn, bodyEn, link } = await request.json();
     if (!title || !body) return NextResponse.json({ error: 'title et body requis' }, { status: 400 });
     if (link?.type === 'url' && !String(link.url ?? '').startsWith('https://')) {
       return NextResponse.json({ error: 'le lien externe doit commencer par https://' }, { status: 400 });
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     const supabase = createAdminClient();
     const { data: tokens } = await supabase
       .from('push_tokens')
-      .select('token')
+      .select('token, locale')
       .eq('notify_global', true);
 
     if (!tokens || tokens.length === 0) {
@@ -37,13 +37,21 @@ export async function POST(request: Request) {
 
     const data = buildData(link as LinkInfo);
 
-    const messages = tokens.map(({ token }: { token: string }) => ({
-      to: token,
-      title,
-      body,
-      sound: 'default',
-      data,
-    }));
+    type TokenRow = { token: string; locale: string | null };
+    const toMessages = (rows: TokenRow[], t: string, b: string) =>
+      rows.map(({ token }) => ({ to: token, title: t, body: b, sound: 'default', data }));
+
+    // Variante EN fournie → chaque téléphone reçoit sa langue (FR par défaut
+    // pour les locales fr*, EN pour tout le reste y compris locale inconnue).
+    const hasEnVariant = Boolean(titleEn && bodyEn);
+    const isFr = (l: string | null) => typeof l === 'string' && l.toLowerCase().startsWith('fr');
+
+    const messages = hasEnVariant
+      ? [
+          ...toMessages((tokens as TokenRow[]).filter((r) => isFr(r.locale)), title, body),
+          ...toMessages((tokens as TokenRow[]).filter((r) => !isFr(r.locale)), titleEn, bodyEn),
+        ]
+      : toMessages(tokens as TokenRow[], title, body);
 
     // Expo accepts max 100 per batch
     const chunks = [];
