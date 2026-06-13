@@ -9,6 +9,7 @@ const links = [
   { href: '/events', label: 'Events', icon: '📅' },
   { href: '/fighters', label: 'Fighters', icon: '🥊' },
   { href: '/notifications', label: 'Notifications', icon: '🔔' },
+  { href: '/organizations', label: 'Organisations', icon: '🏢' },
 ];
 
 export default function Sidebar() {
