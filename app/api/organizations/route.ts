@@ -11,6 +11,33 @@ export async function GET() {
   return NextResponse.json(data);
 }
 
+export async function POST(request: Request) {
+  try {
+    const supabase = createAdminClient();
+    const body = await request.json();
+    if (!body.id || !body.name) return NextResponse.json({ error: 'id et name requis' }, { status: 400 });
+    const { error } = await supabase.from('organizations').insert({
+      id: body.id,
+      name: body.name,
+      short_name: body.short_name || null,
+      tier: body.tier ?? 'regional',
+      region: body.region || null,
+      country: body.country || null,
+      accent_dark: body.accent_dark ?? '#888888',
+      accent_light: body.accent_light ?? '#888888',
+      has_rankings: body.has_rankings ?? false,
+      weight_classes: body.weight_classes ?? [],
+      is_active: false,
+      display_order: body.display_order ?? 99,
+    });
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return NextResponse.json({ error: 'Erreur serveur' }, { status: 500 });
+  }
+}
+
 export async function PATCH(request: Request) {
   try {
     const url = new URL(request.url);
