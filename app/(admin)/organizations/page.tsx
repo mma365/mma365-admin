@@ -78,6 +78,20 @@ VALUES (
   },
   {
     number: 3,
+    title: 'Trouver l\'heure officielle des events',
+    tag: 'HEURE',
+    description: 'Sherdog ne donne pas les horaires. Pour afficher "CE SOIR 22h00" dans l\'app, il faut scraper le site officiel de l\'org ou une source tierce (Tapology, site de l\'org).',
+    checklist: [
+      'Vérifier si l\'org a un site officiel avec les horaires (ex: ufcfightpass.com, onefc.com, ksw.tv)',
+      'Vérifier si Tapology liste les horaires pour cette org : tapology.com/fightcenter',
+      'Si horaire disponible → ajouter un scraper dédié dans sync_event_times.py (ou équivalent) qui renseigne main_card_time_utc en UTC',
+      'Si pas de source fiable → laisser main_card_time_utc NULL : l\'app affichera la date sans heure',
+      'Format attendu en DB : "2026-06-20T20:00:00" (UTC, sans timezone)',
+    ],
+    warning: 'main_card_time_utc NULL n\'est pas bloquant — l\'event s\'affichera avec la date uniquement. Ne pas bloquer l\'ajout d\'une org sur ce point.',
+  },
+  {
+    number: 4,
     title: 'Ajouter au scraper Sherdog',
     tag: 'SCRAPER',
     description: 'Dans mma-scrapers/scrape_sherdog.py, ajouter l\'entrée dans le dict SHERDOG_ORGS (lignes ~49-57).',
@@ -85,7 +99,7 @@ VALUES (
 "Mon Organisation": {"id": "Slug-Sherdog-123", "label": "Mon Organisation"},`,
   },
   {
-    number: 4,
+    number: 5,
     title: 'Valider avec un dry-run',
     tag: 'TEST',
     description: 'Lancer en local pour vérifier que les events sont détectés avec les bonnes dates. Ne pas continuer si le dry-run retourne 0 events.',
@@ -97,7 +111,7 @@ VALUES (
 # ✓ Pas d'erreur HTTP / scraping`,
   },
   {
-    number: 5,
+    number: 6,
     title: 'Lancer le sync réel',
     tag: 'SYNC',
     description: 'Une fois le dry-run validé, insérer les events et les fights en DB.',
@@ -107,7 +121,7 @@ VALUES (
 # Vérifiable dans Supabase : SELECT * FROM events WHERE organization = 'Mon Organisation'`,
   },
   {
-    number: 6,
+    number: 7,
     title: 'Ajouter au workflow GitHub Actions',
     tag: 'CI',
     description: 'Dans mma-scrapers/.github/workflows/daily.yml, ajouter l\'org aux 4 steps (sync_events, sync_fighters, sync_history, sync_results).',
@@ -121,14 +135,14 @@ run: python sync_events.py --orgs UFC ONE PFL KSW "Cage Warriors" "Mon Organisat
     warning: 'Ne modifier le workflow qu\'après validation du dry-run en local. Commit + push déclenchera le daily automatiquement.',
   },
   {
-    number: 7,
+    number: 8,
     title: 'Activer ici + Notifier',
     tag: 'ADMIN',
     description: 'Retourner dans l\'onglet "Liste", cliquer sur "Activer" pour l\'org concernée. L\'org devient immédiatement visible dans MyOrgsScreen pour tous les utilisateurs v1.1+. Un modal s\'ouvre pour envoyer la notification push bilingue.',
     warning: 'Envoyer la notification uniquement si la version de l\'app qui supporte cette org est déjà live sur les stores. Sinon les utilisateurs voient la notif mais rien dans l\'app.',
   },
   {
-    number: 8,
+    number: 9,
     title: 'Checklist visuelle sur l\'app',
     tag: 'TEST',
     description: 'Vérifier chaque point sur un device (ou simulateur) après activation.',
@@ -149,6 +163,7 @@ run: python sync_events.py --orgs UFC ONE PFL KSW "Cage Warriors" "Mon Organisat
 const TAG_COLORS: Record<string, string> = {
   'AVANT TOUT': 'bg-purple-500/20 text-purple-400',
   SQL:          'bg-blue-500/20 text-blue-400',
+  HEURE:        'bg-indigo-500/20 text-indigo-400',
   SCRAPER:      'bg-yellow-500/20 text-yellow-400',
   TEST:         'bg-green-500/20 text-green-400',
   SYNC:         'bg-cyan-500/20 text-cyan-400',
