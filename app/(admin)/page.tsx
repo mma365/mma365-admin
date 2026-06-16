@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { BumpCacheButton } from './BumpCacheButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,6 +30,8 @@ export default async function DashboardPage() {
           </div>
         ))}
       </div>
+      <h2 className="text-white text-lg font-semibold mt-8 mb-4">Cache app</h2>
+      <BumpCacheButton />
     </div>
   );
 }
