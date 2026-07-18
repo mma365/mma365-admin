@@ -7,7 +7,7 @@ export async function POST() {
 
   const keys = ['events_version', 'fighters_version', 'rankings_version'];
   for (const key of keys) {
-    await supabase.table('app_meta').upsert({ key, value: ts, updated_at: ts }, { onConflict: 'key' });
+    await supabase.from('app_meta').upsert({ key, value: ts, updated_at: ts }, { onConflict: 'key' });
   }
 
   return NextResponse.json({ ok: true, ts });

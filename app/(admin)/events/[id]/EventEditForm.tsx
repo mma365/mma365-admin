@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { Fragment, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 type EventRow = Record<string, unknown> & {
@@ -97,6 +97,26 @@ function parseDiff(logs: string[]): ParsedDiff {
 }
 
 type SyncStatus = 'idle' | 'running' | 'done' | 'error';
+
+const METHOD_OPTIONS = ['KO/TKO', 'Submission', 'Decision', 'No Contest', 'DQ'];
+
+type FightForm = {
+  outcome: string;
+  winner: 'red' | 'blue' | '';
+  method: string;
+  round: string;
+  time: string;
+};
+
+function fightFormFromRow(f: FightRow): FightForm {
+  return {
+    outcome: f.outcome ?? '',
+    winner: f.winner_id === f.red_corner_fighter_id ? 'red' : f.winner_id === f.blue_corner_fighter_id ? 'blue' : '',
+    method: f.method ?? '',
+    round: f.round != null ? String(f.round) : '',
+    time: f.time ?? '',
+  };
+}
 
 export default function EventEditForm({ event, fights }: { event: EventRow; fights: FightRow[] }) {
   const router = useRouter();
@@ -223,6 +243,55 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
     setDeleting(true);
     await fetch(`/api/events/${event.id}`, { method: 'DELETE' });
     router.push('/events');
+  }
+
+  const [editingFightId, setEditingFightId] = useState<string | null>(null);
+  const [fightForm, setFightForm] = useState<FightForm | null>(null);
+  const [fightSaving, setFightSaving] = useState(false);
+  const [fightError, setFightError] = useState('');
+
+  function openFightEdit(f: FightRow) {
+    setEditingFightId(f.id);
+    setFightForm(fightFormFromRow(f));
+    setFightError('');
+  }
+
+  function closeFightEdit() {
+    setEditingFightId(null);
+    setFightForm(null);
+    setFightError('');
+  }
+
+  async function handleFightSave(f: FightRow) {
+    if (!fightForm) return;
+    setFightSaving(true);
+    setFightError('');
+    const res = await fetch(`/api/fights/${f.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        outcome: fightForm.outcome || null,
+        winner_id:
+          fightForm.outcome === 'win'
+            ? fightForm.winner === 'red'
+              ? f.red_corner_fighter_id
+              : fightForm.winner === 'blue'
+              ? f.blue_corner_fighter_id
+              : null
+            : null,
+        method: fightForm.method || null,
+        round: fightForm.round ? parseInt(fightForm.round, 10) : null,
+        time: fightForm.time || null,
+      }),
+    });
+    setFightSaving(false);
+    if (!res.ok) {
+      const d = await res.json();
+      setFightError(d.error ?? 'Erreur');
+      return;
+    }
+    closeFightEdit();
+    router.refresh();
   }
 
   function field(key: keyof typeof form, label: string, type = 'text') {
@@ -478,31 +547,131 @@ export default function EventEditForm({ event, fights }: { event: EventRow; figh
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Division</th>
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Type</th>
                   <th className="text-left text-gray-400 font-medium px-4 py-3">Résultat</th>
+                  <th className="text-left text-gray-400 font-medium px-4 py-3"></th>
                 </tr>
               </thead>
               <tbody>
                 {fights.map((f) => {
                   const redName = f.red ? `${f.red.first_name} ${f.red.last_name}` : '?';
                   const blueName = f.blue ? `${f.blue.first_name} ${f.blue.last_name}` : '?';
+                  const isEditing = editingFightId === f.id;
                   return (
-                    <tr key={f.id} className="border-b border-gray-800/50 last:border-0">
-                      <td className="px-4 py-3">
-                        <span className="text-gray-200">{redName}</span>
-                        <span className="text-gray-600 mx-2">vs</span>
-                        <span className="text-gray-200">{blueName}</span>
-                      </td>
-                      <td className="px-4 py-3 text-gray-400 text-xs">{f.weight_class}</td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">
-                        {f.is_main_event
-                          ? '⭐ Main Event'
-                          : f.is_co_main_event
-                          ? '✨ Co-Main'
-                          : f.is_title_fight
-                          ? '🏆 Title'
-                          : '—'}
-                      </td>
-                      <td className="px-4 py-3">{fightResult(f)}</td>
-                    </tr>
+                    <Fragment key={f.id}>
+                      <tr className="border-b border-gray-800/50 last:border-0">
+                        <td className="px-4 py-3">
+                          <span className="text-gray-200">{redName}</span>
+                          <span className="text-gray-600 mx-2">vs</span>
+                          <span className="text-gray-200">{blueName}</span>
+                        </td>
+                        <td className="px-4 py-3 text-gray-400 text-xs">{f.weight_class}</td>
+                        <td className="px-4 py-3 text-gray-500 text-xs">
+                          {f.is_main_event
+                            ? '⭐ Main Event'
+                            : f.is_co_main_event
+                            ? '✨ Co-Main'
+                            : f.is_title_fight
+                            ? '🏆 Title'
+                            : '—'}
+                        </td>
+                        <td className="px-4 py-3">{fightResult(f)}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => (isEditing ? closeFightEdit() : openFightEdit(f))}
+                            className="text-blue-400 hover:text-blue-300 text-xs font-medium"
+                          >
+                            {isEditing ? 'Fermer' : 'Modifier'}
+                          </button>
+                        </td>
+                      </tr>
+                      {isEditing && fightForm && (
+                        <tr className="border-b border-gray-800/50 last:border-0 bg-gray-950/60">
+                          <td colSpan={5} className="px-4 py-4">
+                            <div className="flex flex-wrap items-end gap-3">
+                              <div className="flex flex-col gap-1">
+                                <label className="text-gray-400 text-xs">Résultat</label>
+                                <select
+                                  value={fightForm.outcome}
+                                  onChange={(e) => setFightForm((s) => (s ? { ...s, outcome: e.target.value } : s))}
+                                  className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
+                                >
+                                  <option value="">Pas de résultat</option>
+                                  <option value="win">Victoire</option>
+                                  <option value="draw">Match nul</option>
+                                  <option value="nc">No Contest</option>
+                                </select>
+                              </div>
+
+                              {fightForm.outcome === 'win' && (
+                                <div className="flex flex-col gap-1">
+                                  <label className="text-gray-400 text-xs">Vainqueur</label>
+                                  <select
+                                    value={fightForm.winner}
+                                    onChange={(e) =>
+                                      setFightForm((s) => (s ? { ...s, winner: e.target.value as 'red' | 'blue' } : s))
+                                    }
+                                    className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
+                                  >
+                                    <option value="">—</option>
+                                    <option value="red">{redName}</option>
+                                    <option value="blue">{blueName}</option>
+                                  </select>
+                                </div>
+                              )}
+
+                              {fightForm.outcome && (
+                                <>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-gray-400 text-xs">Méthode</label>
+                                    <select
+                                      value={fightForm.method}
+                                      onChange={(e) => setFightForm((s) => (s ? { ...s, method: e.target.value } : s))}
+                                      className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-red-500"
+                                    >
+                                      <option value="">—</option>
+                                      {METHOD_OPTIONS.map((m) => (
+                                        <option key={m} value={m}>{m}</option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-gray-400 text-xs">Round</label>
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      value={fightForm.round}
+                                      onChange={(e) => setFightForm((s) => (s ? { ...s, round: e.target.value } : s))}
+                                      className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm w-20 focus:outline-none focus:border-red-500"
+                                    />
+                                  </div>
+
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-gray-400 text-xs">Temps</label>
+                                    <input
+                                      type="text"
+                                      placeholder="M:SS"
+                                      value={fightForm.time}
+                                      onChange={(e) => setFightForm((s) => (s ? { ...s, time: e.target.value } : s))}
+                                      className="bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 text-sm w-24 focus:outline-none focus:border-red-500"
+                                    />
+                                  </div>
+                                </>
+                              )}
+
+                              <button
+                                onClick={() => handleFightSave(f)}
+                                disabled={fightSaving}
+                                className="bg-red-600 hover:bg-red-700 text-white font-semibold rounded-lg py-2 px-4 text-sm transition-colors disabled:opacity-50"
+                              >
+                                {fightSaving ? 'Sauvegarde...' : 'Sauvegarder'}
+                              </button>
+
+                              {fightError && <p className="text-red-400 text-xs">{fightError}</p>}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>
