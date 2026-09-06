@@ -8,6 +8,7 @@ const links = [
   { href: '/', label: 'Dashboard', icon: '⚡' },
   { href: '/events', label: 'Events', icon: '📅' },
   { href: '/fighters', label: 'Fighters', icon: '🥊' },
+  { href: '/articles', label: 'Articles', icon: '📰' },
   { href: '/notifications', label: 'Notifications', icon: '🔔' },
   { href: '/organizations', label: 'Organisations', icon: '🏢' },
 ];
