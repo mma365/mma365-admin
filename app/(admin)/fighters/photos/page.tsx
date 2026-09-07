@@ -6,31 +6,32 @@ export const dynamic = 'force-dynamic';
 export default async function FighterPhotosPage() {
   const supabase = createAdminClient();
 
+  // Photos the pipeline finds now go straight to fighters.image_uri, no
+  // review step (Rachid, 2026-09-08 — trusts the automated crop/quality
+  // pipeline). This queue is only for photo_not_found: fighters an official
+  // org site had nothing for, needing a photo sourced by hand.
   const { data } = await supabase
     .from('fighters')
-    .select('id, first_name, last_name, organization, image_uri_candidate, photo_not_found')
-    .or('image_uri_candidate.not.is.null,photo_not_found.eq.true')
+    .select('id, first_name, last_name, organization')
+    .eq('photo_not_found', true)
     .order('organization', { ascending: true })
     .limit(200);
 
   const rows = (data ?? []) as CandidateFighter[];
-  const withCandidate = rows.filter((f) => f.image_uri_candidate);
-  const notFound = rows.filter((f) => !f.image_uri_candidate);
 
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-white text-2xl font-bold">Photos à valider</h1>
+        <h1 className="text-white text-2xl font-bold">Photos à sourcer</h1>
         <p className="text-gray-500 text-sm mt-1">
-          Photos trouvées sur les sites officiels (UFC, ONE, KSW, PFL), en attente de validation avant de devenir visibles dans l&apos;app.
-          {' '}{withCandidate.length} en attente
-          {notFound.length > 0 && <> · {notFound.length} sans photo trouvée, à sourcer manuellement</>}.
+          Combattants pour qui aucune photo n&apos;a été trouvée automatiquement (UFC, ONE, KSW, PFL). Trouvées, les photos sont mises en ligne directement, sans passer par ici.
+          {' '}{rows.length} à traiter.
         </p>
       </div>
 
       {rows.length === 0 ? (
         <div className="bg-gray-900 border border-gray-800 rounded-xl px-6 py-10 text-center text-gray-500 text-sm">
-          Rien à valider pour le moment.
+          Rien à sourcer pour le moment.
         </div>
       ) : (
         <PhotoReviewQueue candidates={rows} />
