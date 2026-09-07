@@ -24,6 +24,30 @@ function pendingCropMetaUrl(fighterId: string) {
   return `${BUCKET_PUBLIC_BASE}/pending/${fighterId}.json`;
 }
 
+// fetch() has no upload-progress event — only XMLHttpRequest does. Used for
+// the file-upload "Remplacer" path, where the payload is an actual photo
+// (can be a few MB) rather than a few bytes of JSON.
+function uploadWithProgress(
+  url: string,
+  formData: FormData,
+  onProgress: (percent: number) => void
+): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      let data: unknown = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* non-JSON response */ }
+      resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, json: async () => data });
+    };
+    xhr.onerror = () => reject(new Error("Erreur réseau pendant l'envoi"));
+    xhr.send(formData);
+  });
+}
+
 type ModalState =
   | { mode: 'adjust'; fighter: CandidateFighter }
   | { mode: 'replace-input'; fighter: CandidateFighter }
@@ -36,6 +60,7 @@ export default function PhotoReviewQueue({ candidates: initial }: { candidates: 
   const [modal, setModal] = useState<ModalState>(null);
   const [busy, setBusy] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [initialBoxes, setInitialBoxes] = useState<Record<string, SuggestedCropMeta | null>>({});
   const [replaceUrl, setReplaceUrl] = useState('');
@@ -137,26 +162,27 @@ export default function PhotoReviewQueue({ candidates: initial }: { candidates: 
     setBusy(true);
     setError('');
     try {
-      let body: BodyInit;
-      let headers: Record<string, string> | undefined;
+      let res: { ok: boolean; json: () => Promise<unknown> };
 
       if (source === 'manual' && file) {
         const form = new FormData();
         form.append('source', 'manual');
         form.append('crop', JSON.stringify(crop));
         form.append('file', file);
-        body = form;
-      } else if (source === 'manual') {
-        body = JSON.stringify({ source: 'manual', crop, imageUrl: replaceUrl.trim() });
-        headers = { 'Content-Type': 'application/json' };
+        setUploadProgress(0);
+        res = await uploadWithProgress(`/api/fighters/photos/${fighter.id}/approve`, form, setUploadProgress);
       } else {
-        body = JSON.stringify({ source: 'candidate', crop });
-        headers = { 'Content-Type': 'application/json' };
+        const body =
+          source === 'manual'
+            ? JSON.stringify({ source: 'manual', crop, imageUrl: replaceUrl.trim() })
+            : JSON.stringify({ source: 'candidate', crop });
+        res = await fetch(`/api/fighters/photos/${fighter.id}/approve`, {
+          method: 'POST', body, headers: { 'Content-Type': 'application/json' },
+        });
       }
 
-      const res = await fetch(`/api/fighters/photos/${fighter.id}/approve`, { method: 'POST', body, headers });
       if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(d.error ?? 'Erreur lors de la validation');
       }
       removeFromQueue([fighter.id]);
@@ -165,6 +191,7 @@ export default function PhotoReviewQueue({ candidates: initial }: { candidates: 
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+      setUploadProgress(null);
     }
   }
 
@@ -356,13 +383,29 @@ export default function PhotoReviewQueue({ candidates: initial }: { candidates: 
             )}
 
             {modal.mode === 'replace-crop' && (
-              <PhotoCropper
-                imageUrl={modal.imageUrl}
-                busy={busy}
-                confirmLabel="Valider la photo"
-                onCancel={() => setModal(null)}
-                onConfirm={(crop) => confirmApprove(modal.fighter, crop, 'manual', modal.file)}
-              />
+              <>
+                {uploadProgress !== null && (
+                  <div className="mb-4">
+                    <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                      <span>Envoi en cours...</span>
+                      <span>{uploadProgress}%</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-red-600 transition-all duration-150"
+                        style={{ width: `${uploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                <PhotoCropper
+                  imageUrl={modal.imageUrl}
+                  busy={busy}
+                  confirmLabel="Valider la photo"
+                  onCancel={() => setModal(null)}
+                  onConfirm={(crop) => confirmApprove(modal.fighter, crop, 'manual', modal.file)}
+                />
+              </>
             )}
           </div>
         </div>
