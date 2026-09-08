@@ -6,9 +6,31 @@ export async function GET(request: Request) {
   const q = searchParams.get('q')?.trim() ?? '';
   const type = searchParams.get('type');
 
-  if (!q || q.length < 2) return NextResponse.json([]);
-
   const supabase = createAdminClient();
+
+  // Articles : liste courte, on autorise une requête vide (→ derniers publiés)
+  // pour que l'admin puisse choisir sans forcément taper le titre.
+  if (type === 'article') {
+    let query = supabase
+      .from('articles')
+      .select('slug, title_fr, type')
+      .eq('status', 'published')
+      .not('slug', 'is', null)
+      .order('published_web_at', { ascending: false })
+      .limit(8);
+    if (q.length >= 2) query = query.ilike('title_fr', `%${q}%`);
+
+    const { data } = await query;
+    return NextResponse.json(
+      (data ?? []).map((a: { slug: string; title_fr: string; type: string }) => ({
+        id: a.slug,
+        label: a.title_fr,
+        sublabel: a.type,
+      }))
+    );
+  }
+
+  if (!q || q.length < 2) return NextResponse.json([]);
 
   if (type === 'event') {
     const { data } = await supabase

@@ -3,13 +3,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
-type LinkType = 'none' | 'event' | 'fighter' | 'fight' | 'url';
+type LinkType = 'none' | 'event' | 'fighter' | 'fight' | 'article' | 'url';
 
 type SearchResult = { id: string; label: string; sublabel?: string };
 
 type FightResult = { id: string; opponent: string; date: string; outcome: string | null };
 
-type SelectedLink = { type: 'event' | 'fighter' | 'fight'; id: string; label: string };
+// Pour un article, `id` porte le slug (l'app ouvre /actu/{slug}).
+type SelectedLink = { type: 'event' | 'fighter' | 'fight' | 'article'; id: string; label: string };
 
 function useDebounce(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
@@ -61,13 +62,15 @@ export default function NotificationsPage() {
   useEffect(() => {
     if (linkType === 'none' || linkType === 'url') return;
     if (linkType === 'fight' && selectedFighter) return;
-    if (debouncedSearch.trim().length < 2) {
+    // Articles : requête vide autorisée (→ derniers articles publiés).
+    if (linkType !== 'article' && debouncedSearch.trim().length < 2) {
       setSearchResults([]);
       setShowDropdown(false);
       return;
     }
 
-    const searchType = linkType === 'event' ? 'event' : 'fighter';
+    const searchType =
+      linkType === 'event' ? 'event' : linkType === 'article' ? 'article' : 'fighter';
 
     async function doSearch() {
       setSearching(true);
@@ -135,6 +138,8 @@ export default function NotificationsPage() {
       setSelectedLink({ type: 'event', id: r.id, label: r.label });
     } else if (linkType === 'fighter') {
       setSelectedLink({ type: 'fighter', id: r.id, label: r.label });
+    } else if (linkType === 'article') {
+      setSelectedLink({ type: 'article', id: r.id, label: r.label }); // r.id = slug
     } else if (linkType === 'fight') {
       setSelectedFighter(r);
       loadFights(r.id);
@@ -174,7 +179,7 @@ export default function NotificationsPage() {
     try {
       const payload: {
         title: string; body: string; titleEn?: string; bodyEn?: string;
-        link?: { type: string; id?: string; url?: string };
+        link?: { type: string; id?: string; slug?: string; url?: string };
       } = { title, body };
       if (showEnVariant && titleEn.trim() && bodyEn.trim()) {
         payload.titleEn = titleEn.trim();
@@ -183,7 +188,10 @@ export default function NotificationsPage() {
       if (linkType === 'url' && externalUrl.trim()) {
         payload.link = { type: 'url', url: externalUrl.trim() };
       } else if (selectedLink) {
-        payload.link = { type: selectedLink.type, id: selectedLink.id };
+        payload.link =
+          selectedLink.type === 'article'
+            ? { type: 'article', slug: selectedLink.id }
+            : { type: selectedLink.type, id: selectedLink.id };
       }
 
       const res = await fetch('/api/notify', {
@@ -218,6 +226,7 @@ export default function NotificationsPage() {
     { value: 'event', label: '📅 Événement' },
     { value: 'fighter', label: '🥊 Combattant' },
     { value: 'fight', label: '⚔️ Combat' },
+    { value: 'article', label: '📰 Article' },
     { value: 'url', label: '🔗 URL externe' },
   ];
 
@@ -333,7 +342,13 @@ export default function NotificationsPage() {
                 <div className="flex items-center justify-between bg-gray-800 border border-green-700 text-white rounded-lg px-4 py-3 text-sm">
                   <div>
                     <span className="text-green-400 text-xs font-semibold uppercase mr-2">
-                      {selectedLink.type === 'event' ? 'Événement' : selectedLink.type === 'fighter' ? 'Combattant' : 'Combat'}
+                      {selectedLink.type === 'event'
+                        ? 'Événement'
+                        : selectedLink.type === 'fighter'
+                        ? 'Combattant'
+                        : selectedLink.type === 'fight'
+                        ? 'Combat'
+                        : 'Article'}
                     </span>
                     <span>{selectedLink.label}</span>
                   </div>
@@ -369,9 +384,12 @@ export default function NotificationsPage() {
                         type="text"
                         value={search}
                         onChange={(e) => { setSearch(e.target.value); setShowDropdown(true); }}
+                        onFocus={() => { if (searchResults.length > 0) setShowDropdown(true); }}
                         placeholder={
                           linkType === 'event'
                             ? 'Rechercher un événement...'
+                            : linkType === 'article'
+                            ? 'Rechercher un article (ou laisser vide)...'
                             : 'Rechercher un combattant...'
                         }
                         className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-red-500"
