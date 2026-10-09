@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { bumpFighters } from '@/lib/appMeta';
 import { NextResponse } from 'next/server';
 
 const BUCKET = 'fighter-photos';
@@ -62,8 +63,7 @@ export async function POST(request: Request) {
   }
 
   if (results.some((r) => r.ok)) {
-    const now = new Date().toISOString();
-    await supabase.from('app_meta').upsert({ key: 'fighters_version', value: now, updated_at: now }, { onConflict: 'key' });
+    await bumpFighters(supabase);
   }
 
   return NextResponse.json({ results });

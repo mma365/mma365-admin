@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { bumpFighters } from '@/lib/appMeta';
 import { NextResponse } from 'next/server';
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -7,8 +8,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const supabase = createAdminClient();
   const { error } = await supabase.from('fighters').update(body).eq('id', id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  const now = new Date().toISOString();
-  await supabase.from('app_meta').upsert({ key: 'fighters_version', value: now, updated_at: now }, { onConflict: 'key' });
+  await bumpFighters(supabase);
   return NextResponse.json({ ok: true });
 }
 

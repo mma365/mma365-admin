@@ -1,4 +1,5 @@
 import { createAdminClient } from '@/lib/supabase/server';
+import { bumpFighters } from '@/lib/appMeta';
 import { NextResponse } from 'next/server';
 import sharp from 'sharp';
 
@@ -98,8 +99,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ fig
     `pending/${fighterId}.json`,
   ]);
 
-  const now = new Date().toISOString();
-  await supabase.from('app_meta').upsert({ key: 'fighters_version', value: now, updated_at: now }, { onConflict: 'key' });
+  await bumpFighters(supabase);
 
   return NextResponse.json({ ok: true, image_uri: imageUri });
 }
