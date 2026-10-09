@@ -42,3 +42,6 @@ next-env.d.ts
 
 # generated social content (article posts/reels)
 scripts/output/
+
+# Config Expo egaree (pas utilisee par Next.js)
+app.json
