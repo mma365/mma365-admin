@@ -132,18 +132,21 @@ begin
       from ev group by 1, 2) x),
 
     -- Events de la période posés sur la grille : jour + heure (Bangkok) de la carte principale,
-    -- sinon du début. Events sans heure connue : non placés.
-    'heatmap_events', (select coalesce(jsonb_agg(x order by x.at), '[]'::jsonb) from (
-      select e.id, e.name as label, e.organization as detail,
-             coalesce(e.main_card_time_utc, e.start_time_utc) as at,
-             extract(isodow from coalesce(e.main_card_time_utc, e.start_time_utc) at time zone v_tz)::int as dow,
-             extract(hour from coalesce(e.main_card_time_utc, e.start_time_utc) at time zone v_tz)::int as hour
+    -- sinon du début. Sans heure connue : at et hour sont null, dow = jour de la semaine de
+    -- events.date (l'admin les marque sur le jour entier).
+    'heatmap_events', (select coalesce(jsonb_agg(x order by x.sort_key), '[]'::jsonb) from (
+      select e.id, e.name as label, e.organization as detail, e.date,
+             t.at,
+             extract(isodow from coalesce(t.at at time zone v_tz, e.date::timestamp))::int as dow,
+             extract(hour from t.at at time zone v_tz)::int as hour,
+             coalesce(t.at, e.date::timestamp at time zone v_tz) as sort_key
       from public.events e
-      where coalesce(e.main_card_time_utc, e.start_time_utc) >= v_since
-        and coalesce(e.main_card_time_utc, e.start_time_utc) < now()
-        and e.organization <> 'Other'
+      cross join lateral (select coalesce(e.main_card_time_utc, e.start_time_utc) as at) t
+      where e.organization <> 'Other'
         and not coalesce(e.cancelled, false)
-      limit 60) x),
+        and ((t.at >= v_since and t.at < now())
+          or (t.at is null and e.date between v_first and v_today))
+      limit 80) x),
 
     'top_fighters', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
       select ev.entity_id as id,
