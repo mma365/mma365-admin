@@ -122,32 +122,6 @@ begin
       where ev.name = 'view_fighter' and coalesce(f.image_uri, '') = ''
       group by 1, 2, 3 order by n desc, label limit 15) x),
 
-    -- Semaine type : actions par jour de la semaine (1 = lundi … 7 = dimanche) × heure (0-23),
-    -- heure de Bangkok, toutes les semaines de la période additionnées. Seules les cases non
-    -- vides sont renvoyées ; l'admin complète la grille avec des zéros.
-    'heatmap', (select coalesce(jsonb_agg(x order by x.dow, x.hour), '[]'::jsonb) from (
-      select extract(isodow from created_at at time zone v_tz)::int as dow,
-             extract(hour from created_at at time zone v_tz)::int as hour,
-             count(*) as n
-      from ev group by 1, 2) x),
-
-    -- Events de la période posés sur la grille : jour + heure (Bangkok) de la carte principale,
-    -- sinon du début. Sans heure connue : at et hour sont null, dow = jour de la semaine de
-    -- events.date (l'admin les marque sur le jour entier).
-    'heatmap_events', (select coalesce(jsonb_agg(x order by x.sort_key), '[]'::jsonb) from (
-      select e.id, e.name as label, e.organization as detail, e.date,
-             t.at,
-             extract(isodow from coalesce(t.at at time zone v_tz, e.date::timestamp))::int as dow,
-             extract(hour from t.at at time zone v_tz)::int as hour,
-             coalesce(t.at, e.date::timestamp at time zone v_tz) as sort_key
-      from public.events e
-      cross join lateral (select coalesce(e.main_card_time_utc, e.start_time_utc) as at) t
-      where e.organization <> 'Other'
-        and not coalesce(e.cancelled, false)
-        and ((t.at >= v_since and t.at < now())
-          or (t.at is null and e.date between v_first and v_today))
-      limit 80) x),
-
     'top_fighters', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
       select ev.entity_id as id,
              coalesce(f.first_name || ' ' || f.last_name, ev.entity_id) as label,
@@ -225,11 +199,70 @@ revoke execute on function public.admin_stats(integer, text, boolean) from publi
 grant execute on function public.admin_stats(integer, text, boolean) to service_role;
 
 
--- ── Ancienne courbe horaire d'un event (remplacée par la grille semaine type) ──────
+-- ── Ancienne courbe horaire d'un event (remplacée par la grille de la semaine) ──────
 drop function if exists public.admin_event_curve(text, text, boolean);
+
+
+-- ── Grille d'une semaine : activité par jour × heure (Bangkok) + events de la semaine ──
+-- p_week_start : n'importe quel jour de la semaine voulue (ramené au lundi) ; null = cette
+-- semaine. cells : actions dans l'app par jour (1 = lundi … 7 = dimanche) et par heure, cases
+-- vides non renvoyées. events : events de la semaine à l'heure de leur carte principale (sinon
+-- du début) ; sans heure connue, at / hour sont null et dow vient de events.date.
+-- Mêmes filtres langue / tampon interne que admin_stats.
+create or replace function public.admin_week_heatmap(
+  p_week_start date default null,
+  p_lang text default 'all',
+  p_include_internal boolean default false
+) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_tz     constant text := 'Asia/Bangkok';
+  v_lang   text := case when p_lang in ('fr', 'en') then p_lang else 'all' end;
+  v_today  date := (now() at time zone v_tz)::date;
+  v_monday date;
+  v_from   timestamptz;
+  v_to     timestamptz;
+begin
+  v_monday := coalesce(p_week_start, v_today);
+  v_monday := v_monday - (extract(isodow from v_monday)::int - 1);
+  v_from := v_monday::timestamp at time zone v_tz;
+  v_to   := (v_monday + 7)::timestamp at time zone v_tz;
+
+  return jsonb_build_object(
+    'week_start', v_monday,
+    'today', v_today,
+    'cells', (select coalesce(jsonb_agg(x order by x.dow, x.hour), '[]'::jsonb) from (
+      select extract(isodow from e.created_at at time zone v_tz)::int as dow,
+             extract(hour from e.created_at at time zone v_tz)::int as hour,
+             count(*) as n
+      from public.app_events e
+      where e.created_at >= v_from and e.created_at < v_to
+        and (p_include_internal or not e.internal)
+        and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(e.locale, '') ilike 'fr%'))
+      group by 1, 2) x),
+    'events', (select coalesce(jsonb_agg(x order by x.sort_key), '[]'::jsonb) from (
+      select e.id, e.name as label, e.organization as detail, e.date,
+             t.at,
+             extract(isodow from coalesce(t.at at time zone v_tz, e.date::timestamp))::int as dow,
+             extract(hour from t.at at time zone v_tz)::int as hour,
+             coalesce(t.at, e.date::timestamp at time zone v_tz) as sort_key
+      from public.events e
+      cross join lateral (select coalesce(e.main_card_time_utc, e.start_time_utc) as at) t
+      where e.organization <> 'Other'
+        and not coalesce(e.cancelled, false)
+        and ((t.at >= v_from and t.at < v_to)
+          or (t.at is null and e.date between v_monday and v_monday + 6))) x)
+  );
+end $$;
+
+revoke execute on function public.admin_week_heatmap(date, text, boolean) from public, anon, authenticated;
+grant execute on function public.admin_week_heatmap(date, text, boolean) to service_role;
 
 -- ── Test (lecture seule) ────────────────────────────────────────────────────────
 -- select public.admin_stats(30, 'all', false);
+-- select public.admin_week_heatmap(null, 'all', false);   -- cette semaine
 
 -- ── Annulation ──────────────────────────────────────────────────────────────────
 -- drop function public.admin_stats(integer, text, boolean);
+-- drop function public.admin_week_heatmap(date, text, boolean);

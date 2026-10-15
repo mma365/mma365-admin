@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { createAdminClient } from '@/lib/supabase/server';
 import { Card, RankList, StatTile, dailyPoints, fmt, type RankRow } from './charts';
 import LineChart from './LineChart';
-import Heatmap, { type HeatCell, type HeatEvent } from './Heatmap';
+import Heatmap, { addDays, type WeekHeatmap } from './Heatmap';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,9 +22,15 @@ type Stats = {
   notifs: { type: string; envois: number; remis: number | null; ouvertures: number }[];
   favorites: { fighters: RankRow[]; events: RankRow[]; fights: RankRow[] };
   no_photo: RankRow[];
-  heatmap: HeatCell[];
-  heatmap_events: HeatEvent[];
 };
+
+const monthFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: 'UTC', day: 'numeric', month: 'long' });
+/** « du 13 au 19 octobre » / « du 27 octobre au 2 novembre ». */
+function weekRange(monday: string): string {
+  const sunday = addDays(monday, 6);
+  const [a, b] = [monthFmt.format(new Date(`${monday}T12:00:00Z`)), monthFmt.format(new Date(`${sunday}T12:00:00Z`))];
+  return monday.slice(5, 7) === sunday.slice(5, 7) ? `du ${a.split(' ')[0]} au ${b}` : `du ${a} au ${b}`;
+}
 
 const PERIODS = [7, 30, 90];
 const LANGS = [
@@ -63,19 +69,25 @@ function pct(part: number, whole: number): string {
 export default async function StatsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; lang?: string; internal?: string }>;
+  searchParams: Promise<{ days?: string; lang?: string; internal?: string; week?: string }>;
 }) {
   const params = await searchParams;
   const days = PERIODS.includes(Number(params.days)) ? Number(params.days) : 30;
   const lang = LANGS.some((l) => l.key === params.lang) ? (params.lang as Stats['lang']) : 'all';
   const internal = params.internal === '1';
+  // Semaine de la grille : un lundi « AAAA-MM-JJ » ; absent ou invalide = semaine en cours.
+  const week =
+    params.week && /^\d{4}-\d{2}-\d{2}$/.test(params.week) && !Number.isNaN(Date.parse(`${params.week}T12:00:00Z`))
+      ? params.week
+      : null;
 
-  function href(change: Partial<{ days: number; lang: string; internal: boolean }>) {
-    const next = { days, lang, internal, ...change };
+  function href(change: Partial<{ days: number; lang: string; internal: boolean; week: string | null }>) {
+    const next = { days, lang, internal, week, ...change };
     const q = new URLSearchParams();
     if (next.days !== 30) q.set('days', String(next.days));
     if (next.lang !== 'all') q.set('lang', next.lang);
     if (next.internal) q.set('internal', '1');
+    if (next.week) q.set('week', next.week);
     const s = q.toString();
     return s ? `/stats?${s}` : '/stats';
   }
@@ -87,6 +99,13 @@ export default async function StatsPage({
     p_include_internal: internal,
   });
   const stats = data as Stats | null;
+
+  const weekRes = await supabase.rpc('admin_week_heatmap', {
+    p_week_start: week,
+    p_lang: lang,
+    p_include_internal: internal,
+  });
+  const weekData = (weekRes.data as WeekHeatmap | null) ?? null;
 
   const pill = (active: boolean) =>
     `px-3 py-1.5 rounded-lg text-sm transition-colors ${
@@ -128,13 +147,28 @@ export default async function StatsPage({
           {error && <p className="text-gray-500 mt-2 text-xs">{error.message}</p>}
         </div>
       ) : (
-        <StatsBody stats={stats} />
+        <StatsBody stats={stats} week={weekData ? weekNav(weekData) : null} />
       )}
     </div>
   );
+
+  /** Libellé et liens de navigation de la grille (pas de semaine future). */
+  function weekNav(w: WeekHeatmap): WeekNav {
+    const nextMonday = addDays(w.week_start, 7);
+    const isCurrent = w.today >= w.week_start && w.today < nextMonday;
+    return {
+      data: w,
+      label: isCurrent ? `Cette semaine, ${weekRange(w.week_start)}` : `Semaine ${weekRange(w.week_start)}`,
+      prev: href({ week: addDays(w.week_start, -7) }),
+      next: nextMonday <= w.today ? href({ week: nextMonday }) : null,
+      current: isCurrent ? null : href({ week: null }),
+    };
+  }
 }
 
-function StatsBody({ stats }: { stats: Stats }) {
+type WeekNav = { data: WeekHeatmap; label: string; prev: string; next: string | null; current: string | null };
+
+function StatsBody({ stats, week }: { stats: Stats; week: WeekNav | null }) {
   const { devices, usage, searches } = stats;
   const langNote = stats.lang === 'all' ? '' : ` · ${stats.lang.toUpperCase()}`;
   const searchTotal = searches.selects + searches.empties;
@@ -187,15 +221,36 @@ function StatsBody({ stats }: { stats: Stats }) {
         </div>
       </div>
 
-      {/* ── Semaine type ───────────────────────────────────────────────────── */}
+      {/* ── Semaine ────────────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Semaine type{langNote}</h2>
-        <Card
-          title="Activité par jour et par heure (heure de Bangkok)"
-          subtitle={`Toutes les semaines des ${stats.days} derniers jours additionnées. Plus la case est claire, plus il y a d’activité à ce moment-là.`}
-        >
-          <Heatmap cells={stats.heatmap} events={stats.heatmap_events} />
-        </Card>
+        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Semaine{langNote}</h2>
+        <section className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          {!week ? (
+            <p className="text-gray-500 text-sm">
+              Grille indisponible : rejoue <code className="text-gray-300">docs/sql/admin_stats.sql</code> (fonction admin_week_heatmap).
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2 mb-1">
+                <Link href={week.prev} className="px-2.5 py-1 rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700" aria-label="Semaine précédente">←</Link>
+                <h3 className="text-white text-sm font-semibold px-1">{week.label}</h3>
+                {week.next ? (
+                  <Link href={week.next} className="px-2.5 py-1 rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700" aria-label="Semaine suivante">→</Link>
+                ) : (
+                  <span className="px-2.5 py-1 rounded-lg text-sm text-gray-600 bg-gray-800/50" aria-hidden>→</span>
+                )}
+                {week.current && (
+                  <Link href={week.current} className="ml-2 text-xs text-red-400 hover:text-red-300">Revenir à cette semaine</Link>
+                )}
+              </div>
+              <p className="text-gray-500 text-xs mb-4">
+                Activité dans l’app heure par heure (heure de Bangkok). Plus la case est claire, plus il y a eu d’actions.
+                Cette grille suit sa propre semaine, pas le filtre de période.
+              </p>
+              <Heatmap week={week.data} />
+            </>
+          )}
+        </section>
       </div>
 
       {/* ── Favoris ────────────────────────────────────────────────────────── */}
