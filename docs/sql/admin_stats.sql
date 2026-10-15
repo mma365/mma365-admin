@@ -9,7 +9,9 @@
 --  - app_events         → vues de fiches, recherches, ouvertures de notifs (mma365/docs/sql/app_events.sql) ;
 --  - notifications_log  → notifs serveur envoyées + recipients_count (appareils remis).
 --
--- Paramètres : p_days (1 à 365, jours calendaires heure de Paris, aujourd'hui compris),
+-- Fuseau : heure de Bangkok (Asia/Bangkok) pour découper les jours et les heures.
+--
+-- Paramètres : p_days (1 à 365, jours calendaires heure de Bangkok, aujourd'hui compris),
 -- p_lang ('all' | 'fr' | 'en' — même règle que notify.py : fr = locale qui commence par
 -- « fr », tout le reste, y compris inconnu, = en), p_include_internal (lignes du tampon interne).
 -- notifications_log n'a pas de langue : les envois sont toujours toutes langues confondues.
@@ -25,7 +27,7 @@ create or replace function public.admin_stats(
 language plpgsql stable security definer set search_path = ''
 as $$
 declare
-  v_tz    constant text := 'Europe/Paris';
+  v_tz    constant text := 'Asia/Bangkok';
   v_days  integer := greatest(1, least(coalesce(p_days, 30), 365));
   v_lang  text := case when p_lang in ('fr', 'en') then p_lang else 'all' end;
   v_today date := (now() at time zone v_tz)::date;
@@ -34,7 +36,7 @@ declare
   result  jsonb;
 begin
   v_first := v_today - (v_days - 1);
-  v_since := v_first::timestamp at time zone v_tz;   -- minuit (Paris) du premier jour
+  v_since := v_first::timestamp at time zone v_tz;   -- minuit (Bangkok) du premier jour
 
   with
   ev as (
@@ -45,7 +47,7 @@ begin
       and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(e.locale, '') ilike 'fr%'))
   ),
   tok as (
-    select t.platform, t.created_at, t.last_seen
+    select t.platform, t.created_at, t.last_seen, t.fighter_ids, t.event_ids, t.fight_ids
     from public.push_tokens t
     where v_lang = 'all' or (v_lang = 'fr') = (coalesce(t.locale, '') ilike 'fr%')
   ),
@@ -73,11 +75,65 @@ begin
       'views',       (select count(*) from ev where name like 'view\_%'),
       'searches',    (select count(*) from ev where name in ('search_select', 'search_empty')),
       'notif_opens', (select count(*) from ev where name = 'notif_open'),
+      -- Activité générale : toutes les actions comptées (fiches, recherches, notifs touchées).
+      -- Pas les simples ouvertures de l'app (pas encore comptées : prochaine OTA).
       'by_day',      (select coalesce(jsonb_agg(jsonb_build_object('day', d.d, 'n', coalesce(c.n, 0)) order by d.d), '[]'::jsonb)
                       from days d
                       left join (select (created_at at time zone v_tz)::date as d, count(*) as n
-                                 from ev where name like 'view\_%' group by 1) c on c.d = d.d)
+                                 from ev group by 1) c on c.d = d.d)
     ),
+
+    -- Favoris actuels des appareils inscrits (photo de l'instant : la période ne s'applique pas,
+    -- on ne sait pas quand un favori a été ajouté ; la langue, si).
+    'favorites', jsonb_build_object(
+      'fighters', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
+        select u.id, coalesce(f.first_name || ' ' || f.last_name, u.id) as label,
+               f.organization as detail, count(*) as n
+        from tok cross join lateral unnest(tok.fighter_ids) as u(id)
+        left join public.fighters f on f.id = u.id
+        group by 1, 2, 3 order by n desc, label limit 10) x),
+      'events', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
+        select u.id, coalesce(e.name, u.id) as label,
+               e.organization || ' · ' || to_char(e.date, 'DD/MM/YYYY') as detail, count(*) as n
+        from tok cross join lateral unnest(tok.event_ids) as u(id)
+        left join public.events e on e.id = u.id
+        group by 1, 2, 3 order by n desc, label limit 10) x),
+      'fights', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
+        select u.id, coalesce(r.last_name || ' vs ' || b.last_name, u.id) as label,
+               e.name as detail, count(*) as n
+        from tok cross join lateral unnest(tok.fight_ids) as u(id)
+        left join public.fights fi on fi.id = u.id
+        left join public.fighters r on r.id = fi.red_corner_fighter_id
+        left join public.fighters b on b.id = fi.blue_corner_fighter_id
+        left join public.events e on e.id = fi.event_id
+        group by 1, 2, 3 order by n desc, label limit 10) x)
+    ),
+
+    -- Fiches combattants ouvertes sur la période qui s'affichent SANS photo (image_uri vide),
+    -- les plus vues d'abord : la liste des photos à chercher en priorité.
+    'no_photo', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
+      select f.id, f.first_name || ' ' || f.last_name as label,
+             f.organization || case
+               when f.image_uri_candidate is not null then ' · photo en attente de validation'
+               when f.photo_not_found then ' · introuvable automatiquement'
+               else '' end as detail,
+             count(*) as n
+      from ev join public.fighters f on f.id = ev.entity_id
+      where ev.name = 'view_fighter' and coalesce(f.image_uri, '') = ''
+      group by 1, 2, 3 order by n desc, label limit 15) x),
+
+    -- Events proposés pour la courbe horaire (admin_event_curve) : 30 jours avant / après aujourd'hui.
+    'event_choices', (select coalesce(jsonb_agg(x order by x.date desc, x.label), '[]'::jsonb) from (
+      select e.id, e.name as label, e.organization as detail, e.date,
+             (select count(*) from ev
+              where (ev.name = 'view_event' and ev.entity_id = e.id)
+                 or (ev.name = 'view_fight' and ev.entity_id in (select fi.id from public.fights fi where fi.event_id = e.id))
+             ) as n
+      from public.events e
+      where e.date between v_today - 30 and v_today + 30
+        and e.organization <> 'Other'
+        and not coalesce(e.cancelled, false)
+      order by e.date desc limit 80) x),
 
     'top_fighters', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
       select ev.entity_id as id,
@@ -155,8 +211,75 @@ end $$;
 revoke execute on function public.admin_stats(integer, text, boolean) from public, anon, authenticated;
 grant execute on function public.admin_stats(integer, text, boolean) to service_role;
 
+
+-- ── Courbe horaire d'un event ───────────────────────────────────────────────────
+-- Combien de fois, heure par heure, quelqu'un a ouvert la page de l'event OU d'un de ses
+-- combats, de 24 h avant à 12 h après le début de la carte principale (sinon le début de
+-- l'event ; sinon midi UTC le jour de l'event, sans repère). Heures renvoyées en UTC (ISO) :
+-- l'admin les affiche à l'heure de Bangkok. Mêmes filtres langue / tampon interne que admin_stats.
+create or replace function public.admin_event_curve(
+  p_event_id text,
+  p_lang text default 'all',
+  p_include_internal boolean default false
+) returns jsonb
+language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_lang   text := case when p_lang in ('fr', 'en') then p_lang else 'all' end;
+  v_event  public.events%rowtype;
+  v_anchor timestamptz;
+  v_from   timestamptz;
+  v_to     timestamptz;
+  result   jsonb;
+begin
+  select * into v_event from public.events where id = p_event_id;
+  if not found then
+    return null;
+  end if;
+
+  v_anchor := coalesce(v_event.main_card_time_utc, v_event.start_time_utc,
+                       (v_event.date::timestamp + interval '12 hours') at time zone 'UTC');
+  v_from := date_trunc('hour', v_anchor) - interval '24 hours';
+  v_to   := date_trunc('hour', v_anchor) + interval '12 hours';
+
+  with
+  fight_ids as (select fi.id from public.fights fi where fi.event_id = p_event_id),
+  ev as (
+    select e.name, e.created_at
+    from public.app_events e
+    where ((e.name = 'view_event' and e.entity_id = p_event_id)
+        or (e.name = 'view_fight' and e.entity_id in (select id from fight_ids))
+        or (e.name = 'notif_open' and (e.entity_id = p_event_id or e.entity_id in (select id from fight_ids))))
+      and (p_include_internal or not e.internal)
+      and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(e.locale, '') ilike 'fr%'))
+  ),
+  hours as (select generate_series(v_from, v_to, interval '1 hour') as h)
+  select jsonb_build_object(
+    'event', jsonb_build_object(
+      'id', v_event.id, 'name', v_event.name, 'organization', v_event.organization, 'date', v_event.date,
+      'start_time_utc', v_event.start_time_utc, 'main_card_time_utc', v_event.main_card_time_utc),
+    'hours', (select coalesce(jsonb_agg(jsonb_build_object('t', h.h, 'n',
+                (select count(*) from ev where ev.name <> 'notif_open'
+                   and ev.created_at >= h.h and ev.created_at < h.h + interval '1 hour')) order by h.h), '[]'::jsonb)
+              from hours h),
+    'views_total',  (select count(*) from ev where name <> 'notif_open'),
+    'notif_opens',  (select count(*) from ev where name = 'notif_open'),
+    'favorites',    (select count(*) from public.push_tokens t
+                     where p_event_id = any(t.event_ids)
+                       and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(t.locale, '') ilike 'fr%')))
+  )
+  into result;
+
+  return result;
+end $$;
+
+revoke execute on function public.admin_event_curve(text, text, boolean) from public, anon, authenticated;
+grant execute on function public.admin_event_curve(text, text, boolean) to service_role;
+
 -- ── Test (lecture seule) ────────────────────────────────────────────────────────
 -- select public.admin_stats(30, 'all', false);
+-- select public.admin_event_curve('<id d''un event>', 'all', false);
 
 -- ── Annulation ──────────────────────────────────────────────────────────────────
 -- drop function public.admin_stats(integer, text, boolean);
+-- drop function public.admin_event_curve(text, text, boolean);

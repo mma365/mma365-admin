@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { createAdminClient } from '@/lib/supabase/server';
-import { Card, DailyColumns, RankList, StatTile, fmt, type RankRow } from './charts';
+import { Card, RankList, StatTile, TZ, dailyPoints, fmt, type RankRow } from './charts';
+import LineChart, { type ChartMarker, type ChartPoint } from './LineChart';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,47 @@ type Stats = {
   sources: RankRow[];
   searches: { selects: number; empties: number; top_queries: RankRow[]; top_empty: RankRow[] };
   notifs: { type: string; envois: number; remis: number | null; ouvertures: number }[];
+  favorites: { fighters: RankRow[]; events: RankRow[]; fights: RankRow[] };
+  no_photo: RankRow[];
+  event_choices: { id: string; label: string; detail: string; date: string; n: number }[];
 };
+
+// Courbe horaire d'un event (admin_event_curve)
+type EventCurve = {
+  event: { id: string; name: string; organization: string; date: string; start_time_utc: string | null; main_card_time_utc: string | null };
+  hours: { t: string; n: number }[];
+  views_total: number;
+  notif_opens: number;
+  favorites: number;
+};
+
+const hourFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, hour: '2-digit' });
+const dayFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, weekday: 'short', day: '2-digit', month: '2-digit' });
+
+/** Heures UTC → points de courbe à l'heure de Bangkok, + repères début / carte principale. */
+function hourlyPoints(curve: EventCurve): { points: ChartPoint[]; markers: ChartMarker[] } {
+  const points = curve.hours.map(({ t, n }) => {
+    const start = new Date(t);
+    const end = new Date(start.getTime() + 3_600_000);
+    return {
+      axis: `${hourFmt.format(start)} h`,
+      tip: `${dayFmt.format(start)} · ${hourFmt.format(start)} h – ${hourFmt.format(end)} h`,
+      n,
+    };
+  });
+  const first = curve.hours.length ? new Date(curve.hours[0].t).getTime() : 0;
+  const indexOf = (iso: string | null) => {
+    if (!iso || !curve.hours.length) return null;
+    const i = Math.floor((new Date(iso).getTime() - first) / 3_600_000);
+    return i >= 0 && i < curve.hours.length ? i : null;
+  };
+  const markers: ChartMarker[] = [];
+  const main = indexOf(curve.event.main_card_time_utc);
+  const start = indexOf(curve.event.start_time_utc);
+  if (start !== null && start !== main) markers.push({ index: start, label: 'Début' });
+  if (main !== null) markers.push({ index: main, label: 'Carte principale' });
+  return { points, markers };
+}
 
 const PERIODS = [7, 30, 90];
 const LANGS = [
@@ -57,7 +98,7 @@ function pct(part: number, whole: number): string {
 export default async function StatsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; lang?: string; internal?: string }>;
+  searchParams: Promise<{ days?: string; lang?: string; internal?: string; event?: string }>;
 }) {
   const params = await searchParams;
   const days = PERIODS.includes(Number(params.days)) ? Number(params.days) : 30;
@@ -70,6 +111,7 @@ export default async function StatsPage({
     if (next.days !== 30) q.set('days', String(next.days));
     if (next.lang !== 'all') q.set('lang', next.lang);
     if (next.internal) q.set('internal', '1');
+    if (params.event) q.set('event', params.event);
     const s = q.toString();
     return s ? `/stats?${s}` : '/stats';
   }
@@ -82,6 +124,27 @@ export default async function StatsPage({
   });
   const stats = data as Stats | null;
 
+  // Event de la courbe : celui choisi, sinon le plus consulté des events proposés,
+  // sinon le dernier event passé.
+  const choices = stats?.event_choices ?? [];
+  function defaultEventId(): string | null {
+    if (params.event && choices.some((c) => c.id === params.event)) return params.event;
+    const mostViewed = choices.reduce<(typeof choices)[number] | null>((best, c) => (c.n > (best?.n ?? 0) ? c : best), null);
+    if (mostViewed) return mostViewed.id;
+    const today = new Date().toISOString().slice(0, 10);
+    return (choices.find((c) => c.date <= today) ?? choices[0])?.id ?? null;
+  }
+  const eventId = defaultEventId();
+  let curve: EventCurve | null = null;
+  if (stats && eventId) {
+    const res = await supabase.rpc('admin_event_curve', {
+      p_event_id: eventId,
+      p_lang: lang,
+      p_include_internal: internal,
+    });
+    curve = (res.data as EventCurve | null) ?? null;
+  }
+
   const pill = (active: boolean) =>
     `px-3 py-1.5 rounded-lg text-sm transition-colors ${
       active ? 'bg-red-600/20 text-red-400 font-medium' : 'text-gray-400 hover:text-white hover:bg-gray-800'
@@ -92,6 +155,7 @@ export default async function StatsPage({
       <h1 className="text-white text-2xl font-bold">Stats</h1>
       <p className="text-gray-500 text-sm mt-1">
         Compteurs anonymes de l’app (depuis l’OTA du 15/10/2026, versions 1.5.0 et plus) et appareils inscrits aux notifications.
+        Jours et heures à l’heure de Bangkok.
       </p>
 
       {/* Une seule rangée de filtres, qui s'applique à toute la page */}
@@ -121,13 +185,29 @@ export default async function StatsPage({
           {error && <p className="text-gray-500 mt-2 text-xs">{error.message}</p>}
         </div>
       ) : (
-        <StatsBody stats={stats} />
+        <StatsBody
+          stats={stats}
+          curve={curve}
+          eventId={eventId}
+          keep={{ days: days !== 30 ? String(days) : null, lang: lang !== 'all' ? lang : null, internal: internal ? '1' : null }}
+        />
       )}
     </div>
   );
 }
 
-function StatsBody({ stats }: { stats: Stats }) {
+function StatsBody({
+  stats,
+  curve,
+  eventId,
+  keep,
+}: {
+  stats: Stats;
+  curve: EventCurve | null;
+  eventId: string | null;
+  /** Filtres actifs, recopiés dans le formulaire de choix de l'event. */
+  keep: Record<string, string | null>;
+}) {
   const { devices, usage, searches } = stats;
   const langNote = stats.lang === 'all' ? '' : ` · ${stats.lang.toUpperCase()}`;
   const searchTotal = searches.selects + searches.empties;
@@ -152,7 +232,7 @@ function StatsBody({ stats }: { stats: Stats }) {
             title="Nouveaux appareils par jour"
             subtitle="Approximation des téléchargements : sans autorisation de notifications pas de token, une réinstallation compte deux fois. Les vrais téléchargements sont dans App Store Connect / Play Console."
           >
-            <DailyColumns data={devices.by_day} unit="appareils" />
+            <LineChart points={dailyPoints(devices.by_day)} unit="nouveaux appareils" />
           </Card>
         </div>
       </div>
@@ -167,14 +247,83 @@ function StatsBody({ stats }: { stats: Stats }) {
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
           <div className="lg:col-span-2">
-            <Card title="Fiches ouvertes par jour">
-              <DailyColumns data={usage.by_day} unit="fiches" />
+            <Card
+              title="Activité dans l’app par jour"
+              subtitle="Fiches ouvertes, recherches et notifs touchées. Les simples ouvertures de l’app ne sont pas encore comptées."
+            >
+              <LineChart points={dailyPoints(usage.by_day)} unit="actions" />
             </Card>
           </div>
           <Card title="D’où viennent les ouvertures" subtitle="Écran depuis lequel la fiche a été ouverte">
             <RankList rows={stats.sources.map((s) => ({ ...s, label: SOURCE_LABELS[s.label] ?? s.label }))} />
           </Card>
         </div>
+      </div>
+
+      {/* ── Courbe d'un event ──────────────────────────────────────────────── */}
+      <div>
+        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Autour d’un event{langNote}</h2>
+        <section className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+          <form method="get" action="/stats" className="flex flex-wrap items-center gap-2">
+            {Object.entries(keep).map(([k, v]) => (v ? <input key={k} type="hidden" name={k} value={v} /> : null))}
+            <label htmlFor="event" className="text-gray-400 text-sm">Event</label>
+            <select
+              id="event"
+              name="event"
+              defaultValue={eventId ?? undefined}
+              className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-1.5 max-w-md"
+            >
+              {stats.event_choices.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.date.split('-').reverse().join('/')} · {c.label}{c.n ? ` (${fmt(c.n)} vues)` : ''}
+                </option>
+              ))}
+            </select>
+            <button type="submit" className="bg-gray-800 hover:bg-gray-700 text-white text-sm px-3 py-1.5 rounded-lg">
+              Voir
+            </button>
+          </form>
+
+          {!curve ? (
+            <p className="text-gray-500 text-sm mt-4">Aucun event entre il y a 30 jours et dans 30 jours.</p>
+          ) : (
+            <EventCurveBlock curve={curve} />
+          )}
+        </section>
+      </div>
+
+      {/* ── Favoris ────────────────────────────────────────────────────────── */}
+      <div>
+        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-1">Favoris{langNote}</h2>
+        <p className="text-gray-500 text-xs mb-3">
+          Ce qui est en favori aujourd’hui sur les appareils inscrits aux notifications (la période ne s’applique pas).
+        </p>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <Card title="Combattants">
+            <RankList rows={stats.favorites.fighters} href={(r) => (r.id ? `/fighters/${r.id}` : null)} />
+          </Card>
+          <Card title="Events">
+            <RankList rows={stats.favorites.events} href={(r) => (r.id ? `/events/${r.id}` : null)} />
+          </Card>
+          <Card title="Combats">
+            <RankList rows={stats.favorites.fights} />
+          </Card>
+        </div>
+      </div>
+
+      {/* ── Photos à chercher ──────────────────────────────────────────────── */}
+      <div>
+        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Photos à chercher en priorité{langNote}</h2>
+        <Card
+          title="Fiches très consultées qui s’affichent sans photo"
+          subtitle="Ces combattants n’ont que leurs initiales dans l’app. Les plus vus d’abord."
+        >
+          <RankList
+            rows={stats.no_photo}
+            empty="Toutes les fiches consultées ont une photo."
+            href={(r) => (r.id ? `/fighters/${r.id}` : null)}
+          />
+        </Card>
       </div>
 
       {/* ── Intérêt ────────────────────────────────────────────────────────── */}
@@ -248,6 +397,36 @@ function StatsBody({ stats }: { stats: Stats }) {
           utilisateurs en 1.4 reçoivent les notifs mais leurs ouvertures ne remontent pas : le taux est un peu sous-estimé.
         </p>
       </div>
+    </div>
+  );
+}
+
+function EventCurveBlock({ curve }: { curve: EventCurve }) {
+  const { points, markers } = hourlyPoints(curve);
+  const e = curve.event;
+  const knownTime = Boolean(e.main_card_time_utc || e.start_time_utc);
+  return (
+    <div className="mt-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+        <div>
+          <p className="text-white font-semibold">{e.name}</p>
+          <p className="text-gray-500 text-xs">
+            {e.organization} · {e.date.split('-').reverse().join('/')}
+          </p>
+        </div>
+        <p className="text-gray-400 text-sm">
+          <span className="text-white font-semibold">{fmt(curve.views_total)}</span> ouvertures ·{' '}
+          <span className="text-white font-semibold">{fmt(curve.favorites)}</span> en favori ·{' '}
+          <span className="text-white font-semibold">{fmt(curve.notif_opens)}</span> notifs ouvertes
+        </p>
+      </div>
+      <p className="text-gray-500 text-xs mt-3 mb-2">
+        Personnes qui ouvrent la page de l’event ou d’un de ses combats, heure par heure (heure de Bangkok),
+        {knownTime
+          ? ' de 24 h avant à 12 h après la carte principale.'
+          : ' heure de l’event inconnue : fenêtre de 36 h autour du jour de l’event, sans repère.'}
+      </p>
+      <LineChart points={points} unit="ouvertures" markers={markers} height={220} />
     </div>
   );
 }
