@@ -1,7 +1,8 @@
 import Link from 'next/link';
 import { createAdminClient } from '@/lib/supabase/server';
-import { Card, RankList, StatTile, TZ, dailyPoints, fmt, type RankRow } from './charts';
-import LineChart, { type ChartMarker, type ChartPoint } from './LineChart';
+import { Card, RankList, StatTile, dailyPoints, fmt, type RankRow } from './charts';
+import LineChart from './LineChart';
+import Heatmap, { type HeatCell, type HeatEvent } from './Heatmap';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,45 +22,9 @@ type Stats = {
   notifs: { type: string; envois: number; remis: number | null; ouvertures: number }[];
   favorites: { fighters: RankRow[]; events: RankRow[]; fights: RankRow[] };
   no_photo: RankRow[];
-  event_choices: { id: string; label: string; detail: string; date: string; n: number }[];
+  heatmap: HeatCell[];
+  heatmap_events: HeatEvent[];
 };
-
-// Courbe horaire d'un event (admin_event_curve)
-type EventCurve = {
-  event: { id: string; name: string; organization: string; date: string; start_time_utc: string | null; main_card_time_utc: string | null };
-  hours: { t: string; n: number }[];
-  views_total: number;
-  notif_opens: number;
-  favorites: number;
-};
-
-const hourFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, hour: '2-digit' });
-const dayFmt = new Intl.DateTimeFormat('fr-FR', { timeZone: TZ, weekday: 'short', day: '2-digit', month: '2-digit' });
-
-/** Heures UTC → points de courbe à l'heure de Bangkok, + repères début / carte principale. */
-function hourlyPoints(curve: EventCurve): { points: ChartPoint[]; markers: ChartMarker[] } {
-  const points = curve.hours.map(({ t, n }) => {
-    const start = new Date(t);
-    const end = new Date(start.getTime() + 3_600_000);
-    return {
-      axis: `${hourFmt.format(start)} h`,
-      tip: `${dayFmt.format(start)} · ${hourFmt.format(start)} h – ${hourFmt.format(end)} h`,
-      n,
-    };
-  });
-  const first = curve.hours.length ? new Date(curve.hours[0].t).getTime() : 0;
-  const indexOf = (iso: string | null) => {
-    if (!iso || !curve.hours.length) return null;
-    const i = Math.floor((new Date(iso).getTime() - first) / 3_600_000);
-    return i >= 0 && i < curve.hours.length ? i : null;
-  };
-  const markers: ChartMarker[] = [];
-  const main = indexOf(curve.event.main_card_time_utc);
-  const start = indexOf(curve.event.start_time_utc);
-  if (start !== null && start !== main) markers.push({ index: start, label: 'Début' });
-  if (main !== null) markers.push({ index: main, label: 'Carte principale' });
-  return { points, markers };
-}
 
 const PERIODS = [7, 30, 90];
 const LANGS = [
@@ -98,7 +63,7 @@ function pct(part: number, whole: number): string {
 export default async function StatsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; lang?: string; internal?: string; event?: string }>;
+  searchParams: Promise<{ days?: string; lang?: string; internal?: string }>;
 }) {
   const params = await searchParams;
   const days = PERIODS.includes(Number(params.days)) ? Number(params.days) : 30;
@@ -111,7 +76,6 @@ export default async function StatsPage({
     if (next.days !== 30) q.set('days', String(next.days));
     if (next.lang !== 'all') q.set('lang', next.lang);
     if (next.internal) q.set('internal', '1');
-    if (params.event) q.set('event', params.event);
     const s = q.toString();
     return s ? `/stats?${s}` : '/stats';
   }
@@ -123,27 +87,6 @@ export default async function StatsPage({
     p_include_internal: internal,
   });
   const stats = data as Stats | null;
-
-  // Event de la courbe : celui choisi, sinon le plus consulté des events proposés,
-  // sinon le dernier event passé.
-  const choices = stats?.event_choices ?? [];
-  function defaultEventId(): string | null {
-    if (params.event && choices.some((c) => c.id === params.event)) return params.event;
-    const mostViewed = choices.reduce<(typeof choices)[number] | null>((best, c) => (c.n > (best?.n ?? 0) ? c : best), null);
-    if (mostViewed) return mostViewed.id;
-    const today = new Date().toISOString().slice(0, 10);
-    return (choices.find((c) => c.date <= today) ?? choices[0])?.id ?? null;
-  }
-  const eventId = defaultEventId();
-  let curve: EventCurve | null = null;
-  if (stats && eventId) {
-    const res = await supabase.rpc('admin_event_curve', {
-      p_event_id: eventId,
-      p_lang: lang,
-      p_include_internal: internal,
-    });
-    curve = (res.data as EventCurve | null) ?? null;
-  }
 
   const pill = (active: boolean) =>
     `px-3 py-1.5 rounded-lg text-sm transition-colors ${
@@ -185,29 +128,13 @@ export default async function StatsPage({
           {error && <p className="text-gray-500 mt-2 text-xs">{error.message}</p>}
         </div>
       ) : (
-        <StatsBody
-          stats={stats}
-          curve={curve}
-          eventId={eventId}
-          keep={{ days: days !== 30 ? String(days) : null, lang: lang !== 'all' ? lang : null, internal: internal ? '1' : null }}
-        />
+        <StatsBody stats={stats} />
       )}
     </div>
   );
 }
 
-function StatsBody({
-  stats,
-  curve,
-  eventId,
-  keep,
-}: {
-  stats: Stats;
-  curve: EventCurve | null;
-  eventId: string | null;
-  /** Filtres actifs, recopiés dans le formulaire de choix de l'event. */
-  keep: Record<string, string | null>;
-}) {
+function StatsBody({ stats }: { stats: Stats }) {
   const { devices, usage, searches } = stats;
   const langNote = stats.lang === 'all' ? '' : ` · ${stats.lang.toUpperCase()}`;
   const searchTotal = searches.selects + searches.empties;
@@ -260,36 +187,15 @@ function StatsBody({
         </div>
       </div>
 
-      {/* ── Courbe d'un event ──────────────────────────────────────────────── */}
+      {/* ── Semaine type ───────────────────────────────────────────────────── */}
       <div>
-        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Autour d’un event{langNote}</h2>
-        <section className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-          <form method="get" action="/stats" className="flex flex-wrap items-center gap-2">
-            {Object.entries(keep).map(([k, v]) => (v ? <input key={k} type="hidden" name={k} value={v} /> : null))}
-            <label htmlFor="event" className="text-gray-400 text-sm">Event</label>
-            <select
-              id="event"
-              name="event"
-              defaultValue={eventId ?? undefined}
-              className="bg-gray-800 border border-gray-700 text-white text-sm rounded-lg px-3 py-1.5 max-w-md"
-            >
-              {stats.event_choices.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.date.split('-').reverse().join('/')} · {c.label}{c.n ? ` (${fmt(c.n)} vues)` : ''}
-                </option>
-              ))}
-            </select>
-            <button type="submit" className="bg-gray-800 hover:bg-gray-700 text-white text-sm px-3 py-1.5 rounded-lg">
-              Voir
-            </button>
-          </form>
-
-          {!curve ? (
-            <p className="text-gray-500 text-sm mt-4">Aucun event entre il y a 30 jours et dans 30 jours.</p>
-          ) : (
-            <EventCurveBlock curve={curve} />
-          )}
-        </section>
+        <h2 className="text-gray-300 text-xs font-semibold uppercase tracking-wider mb-3">Semaine type{langNote}</h2>
+        <Card
+          title="Activité par jour et par heure (heure de Bangkok)"
+          subtitle={`Toutes les semaines des ${stats.days} derniers jours additionnées. Plus la case est claire, plus il y a d’activité à ce moment-là.`}
+        >
+          <Heatmap cells={stats.heatmap} events={stats.heatmap_events} />
+        </Card>
       </div>
 
       {/* ── Favoris ────────────────────────────────────────────────────────── */}
@@ -397,36 +303,6 @@ function StatsBody({
           utilisateurs en 1.4 reçoivent les notifs mais leurs ouvertures ne remontent pas : le taux est un peu sous-estimé.
         </p>
       </div>
-    </div>
-  );
-}
-
-function EventCurveBlock({ curve }: { curve: EventCurve }) {
-  const { points, markers } = hourlyPoints(curve);
-  const e = curve.event;
-  const knownTime = Boolean(e.main_card_time_utc || e.start_time_utc);
-  return (
-    <div className="mt-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
-        <div>
-          <p className="text-white font-semibold">{e.name}</p>
-          <p className="text-gray-500 text-xs">
-            {e.organization} · {e.date.split('-').reverse().join('/')}
-          </p>
-        </div>
-        <p className="text-gray-400 text-sm">
-          <span className="text-white font-semibold">{fmt(curve.views_total)}</span> ouvertures ·{' '}
-          <span className="text-white font-semibold">{fmt(curve.favorites)}</span> en favori ·{' '}
-          <span className="text-white font-semibold">{fmt(curve.notif_opens)}</span> notifs ouvertes
-        </p>
-      </div>
-      <p className="text-gray-500 text-xs mt-3 mb-2">
-        Personnes qui ouvrent la page de l’event ou d’un de ses combats, heure par heure (heure de Bangkok),
-        {knownTime
-          ? ' de 24 h avant à 12 h après la carte principale.'
-          : ' heure de l’event inconnue : fenêtre de 36 h autour du jour de l’event, sans repère.'}
-      </p>
-      <LineChart points={points} unit="ouvertures" markers={markers} height={220} />
     </div>
   );
 }

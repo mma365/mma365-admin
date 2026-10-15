@@ -122,18 +122,28 @@ begin
       where ev.name = 'view_fighter' and coalesce(f.image_uri, '') = ''
       group by 1, 2, 3 order by n desc, label limit 15) x),
 
-    -- Events proposés pour la courbe horaire (admin_event_curve) : 30 jours avant / après aujourd'hui.
-    'event_choices', (select coalesce(jsonb_agg(x order by x.date desc, x.label), '[]'::jsonb) from (
-      select e.id, e.name as label, e.organization as detail, e.date,
-             (select count(*) from ev
-              where (ev.name = 'view_event' and ev.entity_id = e.id)
-                 or (ev.name = 'view_fight' and ev.entity_id in (select fi.id from public.fights fi where fi.event_id = e.id))
-             ) as n
+    -- Semaine type : actions par jour de la semaine (1 = lundi … 7 = dimanche) × heure (0-23),
+    -- heure de Bangkok, toutes les semaines de la période additionnées. Seules les cases non
+    -- vides sont renvoyées ; l'admin complète la grille avec des zéros.
+    'heatmap', (select coalesce(jsonb_agg(x order by x.dow, x.hour), '[]'::jsonb) from (
+      select extract(isodow from created_at at time zone v_tz)::int as dow,
+             extract(hour from created_at at time zone v_tz)::int as hour,
+             count(*) as n
+      from ev group by 1, 2) x),
+
+    -- Events de la période posés sur la grille : jour + heure (Bangkok) de la carte principale,
+    -- sinon du début. Events sans heure connue : non placés.
+    'heatmap_events', (select coalesce(jsonb_agg(x order by x.at), '[]'::jsonb) from (
+      select e.id, e.name as label, e.organization as detail,
+             coalesce(e.main_card_time_utc, e.start_time_utc) as at,
+             extract(isodow from coalesce(e.main_card_time_utc, e.start_time_utc) at time zone v_tz)::int as dow,
+             extract(hour from coalesce(e.main_card_time_utc, e.start_time_utc) at time zone v_tz)::int as hour
       from public.events e
-      where e.date between v_today - 30 and v_today + 30
+      where coalesce(e.main_card_time_utc, e.start_time_utc) >= v_since
+        and coalesce(e.main_card_time_utc, e.start_time_utc) < now()
         and e.organization <> 'Other'
         and not coalesce(e.cancelled, false)
-      order by e.date desc limit 80) x),
+      limit 60) x),
 
     'top_fighters', (select coalesce(jsonb_agg(x order by x.n desc, x.label), '[]'::jsonb) from (
       select ev.entity_id as id,
@@ -212,74 +222,11 @@ revoke execute on function public.admin_stats(integer, text, boolean) from publi
 grant execute on function public.admin_stats(integer, text, boolean) to service_role;
 
 
--- ── Courbe horaire d'un event ───────────────────────────────────────────────────
--- Combien de fois, heure par heure, quelqu'un a ouvert la page de l'event OU d'un de ses
--- combats, de 24 h avant à 12 h après le début de la carte principale (sinon le début de
--- l'event ; sinon midi UTC le jour de l'event, sans repère). Heures renvoyées en UTC (ISO) :
--- l'admin les affiche à l'heure de Bangkok. Mêmes filtres langue / tampon interne que admin_stats.
-create or replace function public.admin_event_curve(
-  p_event_id text,
-  p_lang text default 'all',
-  p_include_internal boolean default false
-) returns jsonb
-language plpgsql stable security definer set search_path = ''
-as $$
-declare
-  v_lang   text := case when p_lang in ('fr', 'en') then p_lang else 'all' end;
-  v_event  public.events%rowtype;
-  v_anchor timestamptz;
-  v_from   timestamptz;
-  v_to     timestamptz;
-  result   jsonb;
-begin
-  select * into v_event from public.events where id = p_event_id;
-  if not found then
-    return null;
-  end if;
-
-  v_anchor := coalesce(v_event.main_card_time_utc, v_event.start_time_utc,
-                       (v_event.date::timestamp + interval '12 hours') at time zone 'UTC');
-  v_from := date_trunc('hour', v_anchor) - interval '24 hours';
-  v_to   := date_trunc('hour', v_anchor) + interval '12 hours';
-
-  with
-  fight_ids as (select fi.id from public.fights fi where fi.event_id = p_event_id),
-  ev as (
-    select e.name, e.created_at
-    from public.app_events e
-    where ((e.name = 'view_event' and e.entity_id = p_event_id)
-        or (e.name = 'view_fight' and e.entity_id in (select id from fight_ids))
-        or (e.name = 'notif_open' and (e.entity_id = p_event_id or e.entity_id in (select id from fight_ids))))
-      and (p_include_internal or not e.internal)
-      and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(e.locale, '') ilike 'fr%'))
-  ),
-  hours as (select generate_series(v_from, v_to, interval '1 hour') as h)
-  select jsonb_build_object(
-    'event', jsonb_build_object(
-      'id', v_event.id, 'name', v_event.name, 'organization', v_event.organization, 'date', v_event.date,
-      'start_time_utc', v_event.start_time_utc, 'main_card_time_utc', v_event.main_card_time_utc),
-    'hours', (select coalesce(jsonb_agg(jsonb_build_object('t', h.h, 'n',
-                (select count(*) from ev where ev.name <> 'notif_open'
-                   and ev.created_at >= h.h and ev.created_at < h.h + interval '1 hour')) order by h.h), '[]'::jsonb)
-              from hours h),
-    'views_total',  (select count(*) from ev where name <> 'notif_open'),
-    'notif_opens',  (select count(*) from ev where name = 'notif_open'),
-    'favorites',    (select count(*) from public.push_tokens t
-                     where p_event_id = any(t.event_ids)
-                       and (v_lang = 'all' or (v_lang = 'fr') = (coalesce(t.locale, '') ilike 'fr%')))
-  )
-  into result;
-
-  return result;
-end $$;
-
-revoke execute on function public.admin_event_curve(text, text, boolean) from public, anon, authenticated;
-grant execute on function public.admin_event_curve(text, text, boolean) to service_role;
+-- ── Ancienne courbe horaire d'un event (remplacée par la grille semaine type) ──────
+drop function if exists public.admin_event_curve(text, text, boolean);
 
 -- ── Test (lecture seule) ────────────────────────────────────────────────────────
 -- select public.admin_stats(30, 'all', false);
--- select public.admin_event_curve('<id d''un event>', 'all', false);
 
 -- ── Annulation ──────────────────────────────────────────────────────────────────
 -- drop function public.admin_stats(integer, text, boolean);
--- drop function public.admin_event_curve(text, text, boolean);
