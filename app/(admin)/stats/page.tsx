@@ -244,7 +244,7 @@ function StatsBody({ stats, week }: { stats: Stats; week: WeekNav | null }) {
                 )}
               </div>
               <p className="text-gray-500 text-xs mb-4">
-                Activité dans l’app heure par heure (heure de Bangkok). Plus la case est claire, plus il y a eu d’actions.
+                Activité dans l’app heure par heure (heure de Bangkok). Plus la case est foncée, plus il y a eu d’actions.
                 Cette grille suit sa propre semaine, pas le filtre de période.
               </p>
               <Heatmap week={week.data} />

@@ -1,14 +1,16 @@
 /**
  * Grille d'une semaine (page Stats), comme un agenda : 7 colonnes (lun. 13 → dim. 19) × 24
- * lignes (heures, Bangkok). Une seule teinte, plus claire = plus d'activité (5 niveaux, relatifs au maximum de
+ * lignes (heures, Bangkok). Une seule teinte, plus foncée = plus d'activité (5 niveaux, relatifs au maximum de
  * la semaine), case vide = gris. Contour blanc : heure de la carte principale d'un event ; point
  * blanc à côté du jour : event ce jour-là sans heure connue. Survol / focus : le détail de la
  * case ; la liste des events et « Voir les chiffres » rendent tout lisible sans survol.
  */
 import { fmt } from './charts';
 
-// Rampe séquentielle bleue (palette de référence, pas plus sombre que 600 sur fond sombre).
-const RAMP = ['#184f95', '#256abf', '#3987e5', '#6da7ec', '#b7d3f6'];
+// Rampe séquentielle bleue (palette de référence), du moins au plus actif : plus c'est foncé,
+// plus il y a d'activité (choix de Rachid). Le plus foncé reste à 2,19:1 sur le fond (pas plus
+// sombre que le pas 600).
+const RAMP = ['#b7d3f6', '#6da7ec', '#3987e5', '#256abf', '#184f95'];
 const EMPTY = '#1f2937'; // gray-800
 
 const DAYS = ['lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.', 'dim.'];
@@ -56,7 +58,7 @@ export default function Heatmap({ week }: { week: WeekHeatmap }) {
     <div>
       {max === 0 && <p className="text-gray-500 text-sm mb-3">Aucune activité cette semaine.</p>}
 
-      {/* Comme un agenda : jours en colonnes (lundi → dimanche), heures en lignes (00 h → 23 h) */}
+      {/* Comme un agenda : jours en colonnes (lundi → dimanche), heures en lignes (23 h en haut → 00 h en bas) */}
       <div className="grid gap-[2px] max-w-3xl" style={{ gridTemplateColumns: '2.5rem repeat(7, minmax(0, 1fr))' }}>
         {/* En-tête : les jours, avec un point quand un event du jour n'a pas d'heure */}
         <span />
@@ -84,7 +86,8 @@ export default function Heatmap({ week }: { week: WeekHeatmap }) {
           );
         })}
 
-        {Array.from({ length: 24 }, (_, h) => (
+        {/* 23 h en haut, 00 h en bas */}
+        {Array.from({ length: 24 }, (_, i) => 23 - i).map((h) => (
           <div key={h} className="contents">
             <span className="text-[10px] text-gray-500 text-right pr-1 self-center" style={{ fontVariantNumeric: 'tabular-nums' }}>
               {`${h2(h)} h`}
